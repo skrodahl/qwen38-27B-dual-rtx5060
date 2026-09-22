@@ -18,6 +18,11 @@ vLLM, no patches, 72 tok/s on prose and 133 tok/s on structured output.**
 [gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090](https://huggingface.co/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090/commit/0cc27958cefbbe231782ec8511de8c4eb5233348)
 (pinned to commit `0cc2795`)
 
+Pinned because this is the latest release of the checkpoint that still
+includes the **MTP head**. Later commits don't include it, and without it
+`--speculative-config` MTP won't work: decode drops to the ~42 tok/s no-MTP
+baseline.
+
 ## Hardware
 
 | Component   | Details                     |
