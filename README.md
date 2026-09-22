@@ -119,8 +119,19 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 - **MTP k > 6.** Prose collapses to ~20 tok/s, half the speed of no speculation
   at all. k=4 gives slightly better prose, k=6 gives much faster structured
   output.
-- **`NCCL_P2P_DISABLE=1`.** GeForce cards don't support direct GPU-to-GPU (P2P)
-  transfers, so tensor-parallel traffic goes through system RAM.
+- **`NCCL_P2P_DISABLE=1` and `--disable_custom_all_reduce`.** GeForce cards
+  don't support direct GPU-to-GPU (P2P) transfers, so tensor-parallel traffic
+  goes through system RAM. vLLM's custom all-reduce kernel works by having each
+  GPU write straight into the other's memory, so it needs P2P. Disabling it
+  leaves the all-reduce to NCCL, which handles the no-P2P path. vLLM usually
+  detects missing P2P and falls back on its own; the flag makes that explicit.
+- **`cudagraph_mode: PIECEWISE`, not FULL.** In earlier testing on this rig,
+  FULL CUDA graphs combined with MTP silently corrupted decoding: the output
+  looped or came back empty, with no crash and no error. PIECEWISE avoids that.
+  FULL hasn't been re-tested on this exact config (fp8 KV, vLLM 0.30.0). It
+  would save some kernel-launch overhead, part of the ~12 % gap between no-MTP
+  decode and the memory-bandwidth ceiling. If you try it, check the output, not
+  just the speed.
 - **x8 PCIe is not the decode bottleneck.** Decode reaches ~88 % of the
   memory-bandwidth ceiling even with tensor-parallel traffic going through host
   RAM.
@@ -177,6 +188,7 @@ services:
       # autotune OOMs. Autotune also requires unassigned VRAM; disabling it
       # provides the headroom to raise gpu-memory-utilization to 0.95-0.96.
       - --no-enable-flashinfer-autotune
+      # No P2P on GeForce: let NCCL do the all-reduce (see gotchas)
       - --disable_custom_all_reduce
       - --api-key
       - api-key
@@ -198,6 +210,8 @@ services:
       # deep prefill.
       - --max-num-seqs
       - "2"
+      # FULL graphs + MTP silently corrupted output in earlier testing
+      # (loops / empty answers, no crash). See gotchas.
       - --compilation-config
       - '{"cudagraph_mode": "PIECEWISE"}'
       - --mamba-cache-dtype
