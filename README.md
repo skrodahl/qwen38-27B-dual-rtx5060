@@ -162,6 +162,112 @@ both. What erodes the ratio is the acceptance term, and only for prose.
 Practically: a 130K-deep agentic session still decodes prose at ~56 tok/s and
 JSON at ~103 tok/s, against ~35 tok/s without MTP at the same depth.
 
+### Choosing k: the full MTP sweep
+
+Every k from 0 to 7, same config, same workload, one vLLM restart each.
+`decode` and `decode_depth` stages, fp8 KV, `max-num-seqs 2`, len 262,144.
+
+| k | Steps/s | Prose tok/s | Structured tok/s | Acceptance, prose / structured | KV pool |
+|--:|--------:|------------:|-----------------:|-------------------------------:|--------:|
+| 0 | 41.90   | 41.99       | 42.00            | — (no drafting)                | 351,618 |
+| 1 | 35.94   | 63.55       | 69.83            | 1.78 / 1.95                    | 290,655 |
+| 2 | 33.26   | 74.71       | 94.62            | 2.25 / 2.86                    | 285,321 |
+| 3 | 30.74   | 77.53       | 107.20           | 2.53 / 3.52                    | 284,319 |
+| 4 | 28.57   | **77.73**   | 122.81           | 2.73 / 4.35                    | 278,927 |
+| 5 | 26.77   | 72.14       | 132.93           | 2.70 / 5.03                    | 274,815 |
+| 6 | 25.21   | 72.45       | 132.75           | 2.89 / 5.33                    | 272,533 |
+| 7 | 23.80   | 70.36       | **135.21**       | 2.96 / 5.76                    | 268,596 |
+
+**The step rate is a straight line in k.** Fitting the measured step times
+gives:
+
+    step time = 25.4 ms + 2.37 ms x k        (steps/s = 1000 / step time)
+
+Every k from 1 to 7 lands within 0.2 steps/s of that line. The 25.4 ms base is
+a plain forward pass (23.9 ms measured at k=0) plus ~1.5 ms of fixed drafting
+overhead, and each draft position costs a flat 2.37 ms after that. So the
+question for any k is only: does draft position k get accepted often enough to
+earn 2.37 ms?
+
+**Prose peaks at k=4, structured at k=5.** Prose gains +21.6, +11.2, +2.8 tok/s
+for k=1..4, then loses ground: acceptance stops rising (2.73 at k=4, 2.70 at
+k=5) while every step keeps getting longer. Structured keeps filling the extra
+slots — per-position acceptance is still 0.46 at position 7 — but the gains
+flatten from k=5: 132.93, 132.75, 135.21.
+
+**Memory is not a reason to pick a low k.** Turning MTP on at all costs 61K
+tokens of KV pool (351,618 -> 290,655): that is the draft head itself. Each
+position after that costs only 3-5K. k=7 still leaves 6,452 tokens of headroom
+over the full 262,144 context.
+
+**At depth the choice sharpens.** Same runs, decode tok/s at three depths:
+
+| k | Prose @0 | @32K | @131K | Structured @0 | @32K | @131K |
+|--:|---------:|-----:|------:|--------------:|-----:|------:|
+| 0 | 41.99    | 39.98 | 34.66 | 42.00        | 39.98 | 34.66 |
+| 1 | 63.58    | 59.44 | 53.30 | 70.41        | 67.40 | 58.10 |
+| 2 | 76.15    | 72.63 | 61.99 | 95.43        | 87.24 | 79.62 |
+| 3 | 78.12    | 72.08 | 66.97 | 109.70       | 105.13 | 92.36 |
+| 4 | 80.10    | 69.60 | **68.83** | 123.33   | 115.61 | 92.41 |
+| 5 | 73.39    | 65.79 | 59.02 | 135.05       | 123.14 | 101.67 |
+| 6 | 74.23    | 67.73 | 55.99 | 130.48       | 127.04 | 103.23 |
+| 7 | 70.39    | 84.49* | 55.48 | 136.12      | 125.38 | 108.31 |
+
+Prose at 131K peaks at k=4 (68.83) and falls 14 % by k=5 — a sharper penalty
+than the 7 % it costs at depth 0. Structured at 131K keeps climbing all the way
+to k=7 (108.31). So the prose/structured trade-off *widens* with depth. Here is
+why, in three steps.
+
+**Step 1 — the step-time law is depth-dependent.** Fit `base + cost x k` to the
+measured step times at each depth separately (k=1..7, prose):
+
+| Depth   | Base step | Cost per draft position | Fit |
+|--------:|----------:|------------------------:|-----|
+| 0       | 25.35 ms  | 2.37 ms                 | all k within 0.2 steps/s |
+| 32,768  | 26.24 ms  | 2.61 ms                 | +4 % base, +10 % per position |
+| 131,072 | 29.36 ms  | 3.19 ms                 | +16 % base, **+35 % per position** |
+
+The base grows because every decode step re-reads the KV cache along with the
+weights, and the cache grows with depth. But the *per-position* cost grows
+faster — and that is the part that matters here. A draft pass is itself a
+forward pass through the draft head, so it also reads the growing cache. **Deep
+context makes each draft token more expensive, not just each step.**
+
+**Step 2 — acceptance does not improve to compensate.** Prose acceptance is
+essentially depth-independent (2.80 at depth 0 and 2.88 at 131K for k=4; 2.95
+and 2.89 for k=7). The draft head is no better at guessing deep in a context
+than shallow in one. So at depth you pay 35 % more per position and get the
+same number of tokens back.
+
+**Step 3 — do the arithmetic for one case.** k=4 against k=7 at 131K, prose:
+
+    k=4:  step 40.83 ms -> 24.5 steps/s x 2.876 accepted = 68.8 tok/s
+    k=7:  step 51.71 ms -> 19.3 steps/s x 2.885 accepted = 55.5 tok/s
+
+Three extra draft positions add 10.9 ms to every step and return 0.009 more
+accepted tokens. That is the whole story of the prose penalty at depth.
+
+Structured output escapes it because its acceptance *does* keep rising with k:
+3.890 at k=4 against 5.679 at k=7, same depth. The extra positions are filled
+often enough to outrun the rising per-position cost:
+
+    k=4:  24.5 steps/s x 3.890 = 92.4 tok/s
+    k=7:  19.3 steps/s x 5.679 = 108.3 tok/s
+
+**The rule that falls out:** the deeper your typical context, the more each
+draft position has to earn. Predictable output (JSON, code, tool calls) keeps
+earning it; prose stops at k=4 and the penalty for overshooting roughly doubles
+by 131K. If your workload is mixed and long, k=4 is the safer end of the range.
+
+\* The 84.49 at k=7 / 32K is a content artefact, not a depth effect. Sampling is
+greedy (`temperature 0`), so each config produces one fixed output; that run's
+output happened to be unusually predictable (acceptance 3.77 against 2.95 at
+depth 0). A k=6 run shows the same artefact at the same depth (140.13 tok/s).
+Treat single tok/s cells as one sample; steps/s is the stable column.
+
+**This config runs k=6** — structured-heavy agentic work, where the ~7 % prose
+loss against k=4 buys ~8 % on structured output. For prose-heavy use, k=4.
+
 ### Power
 
 The 150 W cap does not limit decode: the cards draw ~123 W while decoding.
@@ -205,9 +311,11 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 - **FlashInfer autotune** OOMs on vLLM versions after 0.28.0. Use
   `--no-enable-flashinfer-autotune`. Turning it off also frees the headroom to
   run `gpu-memory-utilization` at 0.95.
-- **MTP k > 6.** Prose collapses to ~20 tok/s, half the speed of no speculation
-  at all. k=4 gives slightly better prose, k=6 gives much faster structured
-  output.
+- **MTP k, the full sweep.** See "Choosing k" above. Prose peaks at k=4 and
+  declines gently after; structured is flat from k=5 on. An earlier note here
+  claimed prose "collapses to ~20 tok/s above k=6" — **that does not reproduce
+  on this config**: k=7 measures 70.4 tok/s on prose. The claim came from a
+  different build and has been withdrawn.
 - **`NCCL_P2P_DISABLE=1` and `--disable_custom_all_reduce`.** GeForce cards
   don't support direct GPU-to-GPU (P2P) transfers, so tensor-parallel traffic
   goes through system RAM. vLLM's custom all-reduce kernel works by having each
