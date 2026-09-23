@@ -13,6 +13,19 @@ vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
   verified with a 250K needle test, measured against a no-MTP baseline, and
   comes with the gotchas that cost context or crash the server.
 
+## Contents
+
+- [Model](#model) · [Hardware](#hardware) · [Software](#software)
+- [Performance](#performance)
+  - [Decode speed](#decode-speed) — MTP k=4 against MTP off
+  - [Decode at depth](#decode-at-depth) — why tok/s falls as context fills
+  - [Choosing k: the full MTP sweep](#choosing-k-the-full-mtp-sweep) — k=0..7, and where each workload peaks
+  - [Power](#power) · [Long context: 250K needle test](#long-context-250k-needle-test) · [Time to first token](#time-to-first-token)
+- [What didn't work, and other gotchas](#what-didnt-work-and-other-gotchas) — 8192 batched tokens, TRITON_ATTN, full CUDA graphs, async scheduling
+- [Tips and tricks](#tips-and-tricks) — what each knob does, and how to test a change without fooling yourself
+- [What would make this faster](#what-would-make-this-faster) — fused draft decode, NVFP4 KV, DSpark
+- [vLLM recipe (Docker Compose)](#vllm-recipe-docker-compose) — the whole config
+
 ## Model
 
 [gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090](https://huggingface.co/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090/commit/0cc27958cefbbe231782ec8511de8c4eb5233348)
@@ -481,7 +494,8 @@ builder declare multi-step support instead of relying on a central list, and
 path for another model with a reported **13.3 % end-to-end gain at concurrency
 1** — single-stream, which is this rig's case.
 [Issue #54369](https://github.com/vllm-project/vllm/issues/54369) goes further
-and argues the rebuild fallback is what "caps useful MTP depth at k=4".
+and argues the rebuild fallback is what "caps useful MTP depth at k=4" — still
+active as of September 2026.
 
 **If that is right, the k curve in this README is partly an artefact of the
 fallback, not of the draft head's quality.** A cheaper per-position cost moves
@@ -498,12 +512,39 @@ shrink, because every decode step re-reads the whole cache (−18 % steps/s at
 131K is *the* reason decode slows down at depth). Not supported for this model's
 GDN layers in vLLM today.
 
-**3. The DSpark draft head.** The checkpoint here is pinned to the last release
-that includes the MTP head; upstream moved to DSpark, published as a separate
-download. It should work with vLLM — untested here. Expect it to trade
-throughput for context: a larger draft head is more VRAM, and on a 32 GB rig
-every GB comes out of the KV pool. Turning MTP on at all already costs 61K pool
-tokens (see "Choosing k"), and that is the shape of the trade.
+**3. The DSpark draft head — TRIED 2026-09-23, does not load on vLLM 0.30.0.**
+The checkpoint here is pinned to the last release that includes the MTP head;
+upstream moved to DSpark, published as a separate 1.4 GB drafter repo
+(`Qwen3.8-27B-DSpark-NVFP4`) alongside a checkpoint whose `lm_head` is NVFP4 and
+whose MTP head is gone.
+
+Everything looked promising from the outside: vLLM 0.30.0 ships
+`qwen3_dspark.py`, resolves the architecture (`Resolved architecture:
+Qwen3DSparkModel`), accepts `{"method": "dspark", "model": "/drafter",
+"num_speculative_tokens": 7}` — 7 because the drafter's `block_size` is 7 and k
+must divide by it — and DSpark drafts a block **in parallel** (vLLM sets
+`parallel_drafting = True`), so it would not pay MTP's flat ~2.37 ms per draft
+position. The drafter ships no `lm_head` or `embed_tokens`, sharing the
+target's.
+
+It dies in weight loading, on both workers:
+
+    File "vllm/model_executor/models/qwen3_dflash.py", line 693, in load_weights
+    File "vllm/model_executor/layers/vocab_parallel_embedding.py", line 507
+    RuntimeError: The size of tensor a (128) must match the size of tensor b (256)
+                  at non-singleton dimension 1
+
+That is an NVFP4 packing mismatch — two values per byte, so a 256-wide row
+arrives as 128 bytes — on a vocabulary-sized tensor, i.e. the shared NVFP4
+`lm_head`. Not fixable with flags. **The drafter's model card says it requires
+the Qwen3.8 SGLang build, and that is correct**; read the card before planning
+around it (this was learned the expensive way). Note also that
+`restart: unless-stopped` will cycle the container on this failure.
+
+Expected trade if it ever does load on vLLM: the weights are 17.91 GB + 1.4 GB
+= 19.31 GB against 18.8 GB here, ~0.5 GB more, which works out at a pool near
+263K — 262,144 would still fit, with the headroom cut from 16,783 to a few
+thousand.
 
 ## vLLM recipe (Docker Compose)
 
@@ -560,8 +601,8 @@ services:
       - --kv-cache-dtype
       - fp8
       # 262144 is the project's target, and it FITS on stock fp8:
-      # at gpu-memory-utilization=0.95, GPU KV cache size: 272,533 tokens,
-      # maximum concurrency for 262,144 tokens per request: 1.04x
+      # at gpu-memory-utilization=0.95 with MTP k=4, GPU KV cache size:
+      # 278,927 tokens, maximum concurrency for 262,144 per request: 1.06x
       - --max-model-len
       - "262144"
       # --max-num-seqs 2 since 2026-09-01. Was 1; the comment below is kept
@@ -572,8 +613,8 @@ services:
       # deep prefill.
       - --max-num-seqs
       - "2"
-      # FULL graphs + MTP silently corrupted output in earlier testing
-      # (loops / empty answers, no crash). See gotchas.
+      # PIECEWISE, not FULL_AND_PIECEWISE: the latter was measured and gave
+      # +2.4% steps/s but no tok/s gain, for 3,197 tokens of pool. See gotchas.
       - --compilation-config
       - '{"cudagraph_mode": "PIECEWISE"}'
       - --mamba-cache-dtype
