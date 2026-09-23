@@ -73,6 +73,71 @@ drafted. That is about 88 % of the theoretical ceiling set by memory bandwidth
 On highly repetitive output, MTP k=6 reaches ~160 tok/s. The ceiling at k=6 is
 7 tokens per step, or ~176 tok/s.
 
+### Decode at depth
+
+Decode speed is not a constant: it falls as the context fills. Measured at
+three depths, MTP k=6, decode only (prefill excluded from the tok/s).
+
+| Depth (context tokens) | Prose tok/s | Structured tok/s | Steps/s | Acceptance, prose / structured |
+|-----------------------:|------------:|-----------------:|--------:|-------------------------------:|
+| 0                      | 74.23       | 130.48           | 25.21   | 2.936 / 5.207                  |
+| 32,768                 | 67.73       | 127.04           | 23.79   | 2.862 / 5.348                  |
+| 131,072                | 55.99       | 103.23           | 20.55   | 2.735 / 5.085                  |
+
+At 128K of context, prose decodes at 75 % of its empty-context speed and
+structured at 79 %. The depth-0 numbers differ by ~2 % from the Decode speed
+table above because they are a different run; that is ordinary run-to-run
+variation, not a config difference.
+
+**Why it falls.** Decode speed is the product of two terms:
+
+    tok/s = steps/s x acceptance
+
+Both decay with depth, but the step rate does almost all of it.
+
+- **Steps/s: −18 % at 128K.** Every decode step reads the model weights once
+  *plus the entire KV cache*. The weights are fixed: 18.8 GB NVFP4, ~8.75 GiB
+  per GPU at TP=2. The KV cache is not. This pool is 4.78 GiB per worker for
+  272,533 tokens, so ~18.4 KiB per token per GPU, and 131,072 tokens adds
+  ~2.30 GiB to the bytes every single step has to read. That is 26 % more
+  traffic for the same weights, and decode is memory-bandwidth-bound, so the
+  step rate should drop by about that much. It does:
+
+  | Depth   | KV bytes/GPU | Predicted steps/s | Measured |
+  |--------:|-------------:|------------------:|---------:|
+  | 0       | 0            | 25.21 (reference) | 25.21    |
+  | 32,768  | 0.575 GiB    | 23.65             | 23.79    |
+  | 131,072 | 2.30 GiB     | 19.96             | 20.55    |
+
+  This is the same mechanism that makes prefill slow down with depth (every
+  new token attends to all the earlier ones), showing up on the decode side.
+
+- **Acceptance: −7 % prose, −2 % structured.** The draft head also gets
+  slightly worse at depth, but it is a minor term. Per-position acceptance
+  (the probability that draft token 1, 2, ... 6 is accepted; acceptance length
+  is 1 + their sum):
+
+  | Depth   | Prose                            | Structured                       |
+  |--------:|----------------------------------|----------------------------------|
+  | 0       | 0.75 0.51 0.31 0.18 0.11 0.08    | 0.91 0.83 0.72 0.67 0.59 0.48    |
+  | 32,768  | 0.73 0.51 0.29 0.16 0.11 0.06    | 0.96 0.83 0.74 0.70 0.62 0.50    |
+  | 131,072 | 0.69 0.42 0.26 0.16 0.12 0.07    | 0.90 0.79 0.74 0.62 0.58 0.47    |
+
+  The prose loss is concentrated in draft positions 2 and 3 (0.51 → 0.42,
+  0.31 → 0.26); the tail was already near zero and has nothing left to lose.
+  Structured output is within noise of flat — at 32K it is actually the best
+  of the three. Predictable output stays predictable at depth.
+
+**Steps/s is identical for prose and structured at every depth** (25.21/25.21,
+23.79/23.79, 20.55/20.54). The cost of a step is set by the model and the
+depth, not by what is being generated. Content only moves acceptance. That is
+what makes the two-term model above usable: the terms are independent.
+
+Practically: a 130K-deep agentic session still decodes prose at ~56 tok/s and
+JSON at ~103 tok/s. The no-MTP baseline was not measured at depth, but the
+bandwidth penalty applies to it identically — it is the same weight-plus-cache
+read — so the MTP speed-up should survive depth largely intact.
+
 ### Power
 
 The 150 W cap does not limit decode: the cards draw ~123 W while decoding.
