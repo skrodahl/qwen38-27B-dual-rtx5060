@@ -270,6 +270,12 @@ often enough to outrun the rising per-position cost:
     k=4:  24.5 steps/s x 3.890 = 92.4 tok/s
     k=7:  19.3 steps/s x 5.679 = 108.3 tok/s
 
+(The k=4 figure is the soft one: a rerun of the same stage measured 4.269
+acceptance and 103.5 tok/s at that depth, so structured acceptance at k=4 is
+sample-dependent and does not clearly fall at depth. The direction — more
+positions still filled at k=7 — holds either way, but the gap is smaller than
+this one pair suggests.)
+
 **The rule that falls out:** the deeper your typical context, the more each
 draft position has to earn. Predictable output (JSON, code, tool calls) keeps
 earning it; prose stops at k=4 and the penalty for overshooting roughly doubles
@@ -342,13 +348,63 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
   GPU write straight into the other's memory, so it needs P2P. Disabling it
   leaves the all-reduce to NCCL, which handles the no-P2P path. vLLM usually
   detects missing P2P and falls back on its own; the flag makes that explicit.
-- **`cudagraph_mode: PIECEWISE`, not FULL.** In earlier testing on this rig,
-  FULL CUDA graphs combined with MTP silently corrupted decoding: the output
-  looped or came back empty, with no crash and no error. PIECEWISE avoids that.
-  FULL hasn't been re-tested on this exact config (fp8 KV, vLLM 0.30.0). It
-  would save some kernel-launch overhead, part of the ~12 % gap between no-MTP
-  decode and the memory-bandwidth ceiling. If you try it, check the output, not
-  just the speed.
+- **`cudagraph_mode`: PIECEWISE is what this config runs; FULL_AND_PIECEWISE
+  was measured and is a valid alternative that buys almost nothing here.**
+  vLLM 0.30.0 offers NONE, PIECEWISE, FULL, FULL_DECODE_ONLY and
+  FULL_AND_PIECEWISE. With chunked prefill, FULL_AND_PIECEWISE is the one to
+  try: full graphs for decode-only batches, piecewise for the mixed prefill
+  batches. Note that under PIECEWISE the *draft* steps get no graphs at all
+  (`speculator.py`: "PIECEWISE cudagraphs are not supported for draft
+  decodes"), so this is where a gain would come from. Measured at k=4, same
+  workload:
+
+  | | PIECEWISE | FULL_AND_PIECEWISE |
+  |---|---:|---:|
+  | Steps/s @0 / 32K / 131K | 28.55 / 27.36 / 24.17 | 29.29 / 28.02 / 24.68 |
+  | Step time saved          | —                     | ~0.87 ms at every depth |
+  | Prose / structured tok/s | 78.31 / 124.89        | 77.47 / 124.44 |
+  | TTFT 32K                 | 10.521 s              | 10.624 s |
+  | KV pool                  | 278,927               | 275,730 (−3,197) |
+  | 250K needle              | recovered             | recovered, clean |
+
+  So: **no throughput gain.** The step rate rises 2.1-2.6 % at every depth, but
+  measured tok/s did not follow — prose and structured both came out slightly
+  *lower*, because acceptance on these prompts was 1-3 % lower under full
+  graphs. Whether that acceptance difference is specific to these prompts or
+  systematic is not established; either way, the faster steps did not turn into
+  tokens. Prefill is unchanged, and 3,197 tokens of pool are spent. Graph
+  capture took 19 s and 0.35 GiB per worker. An older note here warned that FULL graphs plus MTP silently
+  corrupt decoding into loops or empty answers — **that does not reproduce on
+  stock 0.30.0**; it came from a different build. PIECEWISE stays because full
+  graphs bought no throughput here, not because FULL is unsafe.
+- **`--attention-backend TRITON_ATTN` — do not.** FlashInfer logs "Fused
+  multi-step draft decode is not supported by attention backend(s)
+  FLASHINFER; falling back to rebuilding attention metadata between draft
+  steps", which looks like free performance: TRITON_ATTN supports the fused
+  path, so the message disappears, and it also frees FlashInfer's 64 MB
+  workspace (pool 283,722 against 278,927). Measured, it is a disaster at
+  depth:
+
+  | Depth | Steps/s FlashInfer | TRITON_ATTN |
+  |------:|-------------------:|------------:|
+  | 0     | 28.55              | 28.76 (+0.7 %) |
+  | 32,768 | 27.36             | 18.25 (**−33 %**) |
+  | 131,072 | 24.17            | 8.71 (**−64 %**) |
+
+  At 131K that is 25.8 tok/s prose — slower than no speculative decoding at
+  all. Prefill suffers too (2,670 tok/s at 32K against 3,119), and the cards
+  run 6-9 °C hotter for the extra work. **The fused draft path is worth ~0.7 %;
+  FlashInfer's attention kernel is worth 2.8x at 131K.** The flat depth curve in
+  this README is FlashInfer's doing. Vision still worked under TRITON_ATTN,
+  despite the startup line about `mm_prefix` being disabled — that message
+  means a backend constraint was relaxed (this config disables video), not that
+  multimodal support was dropped.
+- **`--async-scheduling` changes nothing here.** It overlaps the CPU's
+  scheduling of the next step with the current step's GPU work, which only pays
+  when the CPU is the bottleneck. At `max-num-seqs 2` with ~35 ms steps it is
+  not: steps/s, acceptance and reasoning length came back byte-identical to the
+  baseline. Worth revisiting for high-concurrency serving, not for a
+  single-user rig.
 - **x8 PCIe is not the decode bottleneck.** Decode reaches ~88 % of the
   memory-bandwidth ceiling even with tensor-parallel traffic going through host
   RAM.
@@ -359,6 +415,95 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
   recipe only disables video.
 - **`max-num-seqs` and `max-num-batched-tokens` change the KV pool size.**
   Re-read `GPU KV cache size` in the startup log after changing either.
+
+## Tips and tricks
+
+**What each knob does, if you change it from this recipe:**
+
+| Knob | Here | Change it and… |
+|------|------|----------------|
+| `max-num-batched-tokens` | 4096 | 8192 buys no speed and caps context at 200K |
+| MTP `num_speculative_tokens` | 4 | prose peaks at 4; structured keeps rising to 7; see "Choosing k" |
+| `cudagraph_mode` | PIECEWISE | FULL_AND_PIECEWISE: +2.4 % steps/s, no tok/s gain, −3,197 pool |
+| attention backend | FlashInfer (default) | TRITON_ATTN: −33 % at 32K, −64 % at 131K |
+| `async-scheduling` | off | no effect at `max-num-seqs 2` |
+| `max-num-seqs` | 2 | higher collapses per-stream rate on these cards (measured outside this repo) |
+| `flashinfer-autotune` | off | on: OOMs on vLLM after 0.28.0 |
+| `gpu-memory-utilization` | 0.95 | above 0.91 OOMs *if* batched tokens is 8192 |
+| `kv-cache-dtype` | fp8 | bf16 roughly doubles KV bytes/token; 262K would not fit |
+
+**Method — how to test a change without fooling yourself:**
+
+- **Re-read `GPU KV cache size` after every change.** Most knobs move the pool:
+  MTP k, batched tokens, graph mode, attention backend. The startup log is the
+  only truth.
+- **Scope the log to the container's `StartedAt`.** `compose up -d` keeps the
+  old log, so an unscoped grep can read the *previous* boot and show a false
+  READY:
+  `docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' <container>)" <container>`
+- **Compare steps/s, not tok/s.** Sampling here is greedy (`temperature 0`), so
+  each config produces one fixed output; tok/s then depends on how predictable
+  that particular text is. Steps/s is set by the model, the depth and k, and it
+  reproduces to ±0.02.
+- **Check the reasoning-token count before trusting a tok/s comparison.** A
+  reply that thinks for 800 tokens and one that thinks for 150 are not the same
+  workload, and the difference is worth 40 tok/s on the structured prompt.
+- **Test at depth, not just at depth 0.** TRITON_ATTN looked 0.7 % *faster*
+  empty and was 64 % slower at 131K. Depth-0 numbers hide the thing you
+  actually care about.
+- **A speed test cannot catch a broken config.** Silent KV/graph corruption
+  shows up as looping or empty output while tok/s stays healthy. End every
+  config change with the 250K needle and *read the reply text*, not just the
+  pass flag.
+- **Warm up.** The first run after a restart is slower — ~3 % on prose here.
+  Discard it.
+- **One variable at a time, and write down the pool.** Two of the "findings"
+  this README started with turned out to be artefacts of an older build; both
+  died the moment they were re-measured in isolation.
+
+## What would make this faster
+
+Three things could move these numbers, in rough order of how much they would
+change the tables above.
+
+**1. Fused multi-step draft decode on FlashInfer.** Every MTP step here rebuilds
+the attention metadata between draft positions, because FlashInfer does not
+declare support for updating it in place:
+
+    Fused multi-step draft decode is not supported by attention backend(s)
+    FLASHINFER; falling back to rebuilding attention metadata between draft steps.
+
+That fallback is part of the flat **2.37 ms per draft position** measured in
+"Choosing k". Upstream is moving: vLLM
+[PR #55292](https://github.com/vllm-project/vllm/pull/55292) lets each metadata
+builder declare multi-step support instead of relying on a central list, and
+[PR #57443](https://github.com/vllm-project/vllm/pull/57443) enabled the fused
+path for another model with a reported **13.3 % end-to-end gain at concurrency
+1** — single-stream, which is this rig's case.
+[Issue #54369](https://github.com/vllm-project/vllm/issues/54369) goes further
+and argues the rebuild fallback is what "caps useful MTP depth at k=4".
+
+**If that is right, the k curve in this README is partly an artefact of the
+fallback, not of the draft head's quality.** A cheaper per-position cost moves
+the break-even point, and k=5-7 could start paying for prose too. The sweep
+would be worth re-running the day FlashInfer declares support. Switching to a
+backend that already has it is not the answer — see TRITON_ATTN under "What
+didn't work".
+
+**2. NVFP4 KV cache for GDN models.** The KV cache is fp8 here, ~16.3 KiB per
+token per GPU. NVFP4 would roughly halve that. Two consequences, both visible in
+the tables above: the pool would grow far past 262K, so several full-context
+sessions could be resident at once; and the step-rate decay at depth would
+shrink, because every decode step re-reads the whole cache (−18 % steps/s at
+131K is *the* reason decode slows down at depth). Not supported for this model's
+GDN layers in vLLM today.
+
+**3. The DSpark draft head.** The checkpoint here is pinned to the last release
+that includes the MTP head; upstream moved to DSpark, published as a separate
+download. It should work with vLLM — untested here. Expect it to trade
+throughput for context: a larger draft head is more VRAM, and on a 32 GB rig
+every GB comes out of the KV pool. Turning MTP on at all already costs 61K pool
+tokens (see "Choosing k"), and that is the shape of the trade.
 
 ## vLLM recipe (Docker Compose)
 
