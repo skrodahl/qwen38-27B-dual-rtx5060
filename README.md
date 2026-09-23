@@ -1,14 +1,14 @@
 # Qwen 3.8 27B NVFP4 with FP8 KV cache on vLLM 0.30.0
 
 **A 27B model with its full 262K context on two midrange 16 GB cards: stock
-vLLM, no patches, 72 tok/s on prose and 133 tok/s on structured output.**
+vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
 
 - **What:** Qwen 3.8 27B (NVFP4 weights, FP8 KV cache) on 2 × RTX 5060 Ti,
   tensor parallel, with MTP speculative decoding, on a headless Ubuntu 26.04
   box.
 - **How:** the official vLLM 0.30.0 Docker image and one Compose file. The full
   recipe is at the bottom. The tuning that matters is `max-num-batched-tokens
-  4096`, FlashInfer autotune off, and MTP k=6.
+  4096`, FlashInfer autotune off, and MTP k=4.
 - **Why:** to show that full-context agentic work doesn't need a 5090. It's
   verified with a 250K needle test, measured against a no-MTP baseline, and
   comes with the gotchas that cost context or crash the server.
@@ -51,32 +51,39 @@ All runs: vLLM 0.30.0, fp8 KV cache, `max-num-seqs 2`, `max-model-len 262,144`.
 
 ### Decode speed
 
-| Output type | No MTP tok/s | MTP k=6 tok/s | Speed-up | Steps/s (no MTP / MTP) | Acceptance (MTP) | Reasoning tokens (no MTP / MTP) |
+The operating config, MTP k=4, against the same workload with MTP off. Both
+runs 2026-09-23, decode tok/s excludes prefill.
+
+| Output type | No MTP tok/s | MTP k=4 tok/s | Speed-up | Steps/s (no MTP / MTP) | Acceptance (MTP) | Reasoning tokens (no MTP / MTP) |
 |-------------|-------------:|--------------:|---------:|-----------------------:|-----------------:|--------------------------------:|
-| Prose       | 41.72        | 72.45         | 1.7×     | 41.84 / 25.21          | 2.888            | 411 / 511                       |
-| Structured  | 41.72        | 132.75        | 3.2×     | 41.81 / 25.20          | 5.333            | 150 / 158                       |
-| Mixed       | 41.70        | 73.84         | 1.8×     | 41.79 / 25.19          | 2.952            | 522 / 275                       |
+| Prose       | 41.99        | 78.31         | 1.9×     | 41.92 / 28.57          | 2.730            | 342 / 347                       |
+| Structured  | 41.99        | 124.89        | 3.0×     | 41.93 / 28.55          | 4.348            | 165 / 166                       |
+| Mixed       | 41.92        | 81.61         | 1.9×     | 41.86 / 28.56          | 2.847            | 519 / 525                       |
 
 | Config  | KV cache pool | Headroom over max-model-len |
 |---------|--------------:|----------------------------:|
 | No MTP  | 351,618 tok   | +89,474                     |
-| MTP k=6 | 272,533 tok   | +10,389                     |
+| MTP k=4 | 278,927 tok   | +16,783                     |
 
-**MTP k=6** (6 speculative tokens) gives the fastest structured output while
-keeping prose close to its best. Decode speed is the only metric that differs
-between the MTP and non-MTP runs.
+**MTP k=4** (4 speculative tokens) is the setting this config runs. It is the
+peak for prose and for mixed prose+JSON output; a higher k trades prose speed
+for structured speed. See "Choosing k" below for the full k=0..7 sweep. Decode
+speed is the only metric that differs between the MTP and non-MTP runs.
 
 Without MTP, every output type decodes at the same speed, since nothing is
 drafted. That is about 88 % of the theoretical ceiling set by memory bandwidth
 (~47 tok/s).
 
-On highly repetitive output, MTP k=6 reaches ~160 tok/s. The ceiling at k=6 is
-7 tokens per step, or ~176 tok/s.
+The arithmetic ceiling at k=4 is 5 tokens per step, or ~143 tok/s; structured
+output measures 125, so it fills 4.35 of the 5 slots. (At k=6 the ceiling is
+~176 tok/s and highly repetitive output has been seen to reach ~160.)
 
 ### Decode at depth
 
 Decode speed is not a constant: it falls as the context fills. Measured at
-three depths, MTP k=6, decode only (prefill excluded from the tok/s).
+three depths, decode only (prefill excluded from the tok/s). **These tables are
+the k=6 run**, kept because the per-position detail below was captured there;
+the same depths for every k, including the operating k=4, are in "Choosing k".
 
 | Depth (context tokens) | Prose tok/s | Structured tok/s | Steps/s | Acceptance, prose / structured |
 |-----------------------:|------------:|-----------------:|--------:|-------------------------------:|
@@ -169,14 +176,14 @@ Every k from 0 to 7, same config, same workload, one vLLM restart each.
 
 | k | Steps/s | Prose tok/s | Structured tok/s | Mixed tok/s | Acceptance, prose / structured | KV pool |
 |--:|--------:|------------:|-----------------:|------------:|-------------------------------:|--------:|
-| 0 | 41.90   | 41.99       | 42.00            | 41.85       | — (no drafting)                | 351,618 |
-| 1 | 35.94   | 63.55       | 69.83            | 63.41       | 1.78 / 1.95                    | 290,655 |
-| 2 | 33.26   | 74.71       | 94.62            | 77.54       | 2.25 / 2.86                    | 285,321 |
-| 3 | 30.74   | 77.53       | 107.20           | **83.01**   | 2.53 / 3.52                    | 284,319 |
-| 4 | 28.57   | **77.73**   | 122.81           | 81.61       | 2.73 / 4.35                    | 278,927 |
-| 5 | 26.77   | 72.14       | 132.93           | 79.03       | 2.70 / 5.03                    | 274,815 |
-| 6 | 25.21   | 72.45       | 132.75           | 74.67       | 2.89 / 5.33                    | 272,533 |
-| 7 | 23.80   | 70.36       | **135.21**       | 76.50       | 2.96 / 5.76                    | 268,596 |
+| 0 | 41.92   | 41.99       | 41.99            | 41.92       | — (no drafting)                | 351,618 |
+| 1 | 35.94   | 63.91       | 70.27            | 63.41       | 1.78 / 1.95                    | 290,655 |
+| 2 | 33.26   | 75.21       | 95.40            | 77.54       | 2.25 / 2.86                    | 285,321 |
+| 3 | 30.74   | 78.10       | 108.73           | **83.01**   | 2.53 / 3.52                    | 284,319 |
+| 4 | 28.57   | **78.31**   | 124.89           | 81.61       | 2.73 / 4.35                    | 278,927 |
+| 5 | 26.77   | 72.66       | 135.58           | 79.03       | 2.70 / 5.03                    | 274,815 |
+| 6 | 25.19   | 73.09       | 135.36           | 74.67       | 2.89 / 5.33                    | 272,533 |
+| 7 | 23.80   | 70.84       | **138.08**       | 76.50       | 2.96 / 5.76                    | 268,596 |
 
 **Mixed** is one prompt that answers in prose and then emits a JSON summary —
 the closest stand-in here for a real agent turn. It peaks at **k=3-4**, with
@@ -197,11 +204,12 @@ overhead, and each draft position costs a flat 2.37 ms after that. So the
 question for any k is only: does draft position k get accepted often enough to
 earn 2.37 ms?
 
-**Prose peaks at k=4, structured at k=5.** Prose gains +21.6, +11.2, +2.8 tok/s
-for k=1..4, then loses ground: acceptance stops rising (2.73 at k=4, 2.70 at
-k=5) while every step keeps getting longer. Structured keeps filling the extra
-slots — per-position acceptance is still 0.46 at position 7 — but the gains
-flatten from k=5: 132.93, 132.75, 135.21.
+**Prose peaks at k=4, structured keeps climbing.** Prose gains +22.0, +11.3,
++2.9, +0.2 tok/s for k=1..4, then loses ground: acceptance stops rising (2.73
+at k=4, 2.70 at k=5) while every step keeps getting longer. Structured keeps
+filling the extra slots — per-position acceptance is still 0.46 at position 7 —
+but its gains flatten too: 135.58, 135.36, 138.08 for k=5,6,7, against +16.2
+from k=3 to k=4.
 
 **Memory is not a reason to pick a low k.** Turning MTP on at all costs 61K
 tokens of KV pool (351,618 -> 290,655): that is the draft head itself. Each
@@ -273,8 +281,11 @@ output happened to be unusually predictable (acceptance 3.77 against 2.95 at
 depth 0). A k=6 run shows the same artefact at the same depth (140.13 tok/s).
 Treat single tok/s cells as one sample; steps/s is the stable column.
 
-**This config runs k=6** — structured-heavy agentic work, where the ~7 % prose
-loss against k=4 buys ~8 % on structured output. For prose-heavy use, k=4.
+**This config runs k=4** — the peak for prose and for mixed output, and the
+setting whose depth penalty is smallest. Agent turns here are prose-heavy in
+practice: the reasoning block is prose, and it is often several hundred tokens
+before any JSON appears. k=5-7 is the choice only for output that is
+overwhelmingly structured.
 
 ### Power
 
@@ -292,7 +303,8 @@ server survives the prefill.
 |--------------:|-------------:|--------------:|--------|
 | 249,450       | 246.7 s      | 1,011         | Passphrase recovered |
 
-Same config as the recipe below (MTP k=6, `gpu-memory-utilization 0.95`).
+Measured at MTP k=6, `gpu-memory-utilization 0.95`; prefill is unaffected by
+k, since speculation applies to decode only.
 Prefill rate falls with depth because every new token attends to all the
 earlier ones: ~4,200 tok/s at 4K, ~3,100 at 32K, ~1,000 at 250K.
 
@@ -434,11 +446,13 @@ services:
       - '{"video": 0}'
       - --mm-processor-kwargs
       - '{"max_pixels": 1000000}'
-      # MTP: 6 gives maximum structured output (up to ~160 t/s on highly
-      # repetitive output, ~133 t/s on typical JSON), while affecting prose
-      # minimally (~72-75 t/s)
+      # MTP k: measured sweep k=0..7 (see README "Choosing k"). 4 is the peak
+      # for prose (~78 t/s) and for mixed prose+JSON (~82 t/s); structured is
+      # ~125 t/s here and would reach ~138 at k=7, at the cost of prose.
+      # Step time is 25.4 ms + 2.37 ms per draft position, so each position
+      # must earn its 2.37 ms in accepted tokens.
       - --speculative-config
-      - '{"method": "mtp", "num_speculative_tokens": 6}'
+      - '{"method": "mtp", "num_speculative_tokens": 4}'
       - --reasoning-parser
       - qwen3
       - --tool-call-parser
