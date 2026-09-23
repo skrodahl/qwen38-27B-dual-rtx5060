@@ -133,10 +133,34 @@ Both decay with depth, but the step rate does almost all of it.
 depth, not by what is being generated. Content only moves acceptance. That is
 what makes the two-term model above usable: the terms are independent.
 
+**Without MTP, measured at the same depths** (pool 351,618, 5.47 GiB/worker):
+
+| Depth (context tokens) | Prose tok/s | Structured tok/s | Steps/s |
+|-----------------------:|------------:|-----------------:|--------:|
+| 0                      | 41.99       | 42.00            | 41.90   |
+| 32,768                 | 39.98       | 39.98            | 39.90   |
+| 131,072                | 34.66       | 34.66            | 34.56   |
+
+Prose and structured are identical at every depth, to 0.01 tok/s, because
+nothing is drafted: one step, one token, whatever the content. The same
+weights-plus-cache model predicts the decay here too — this pool is 16.3 KiB
+per token per GPU, so 131,072 tokens add ~2.04 GiB to the ~8.75 GiB of
+weights, predicting 33.98 steps/s against 34.56 measured.
+
+**The MTP speed-up survives depth**, with a small erosion from acceptance:
+
+| Depth   | Prose speed-up | Structured speed-up |
+|--------:|---------------:|--------------------:|
+| 0       | 1.77×          | 3.11×               |
+| 32,768  | 1.69×          | 3.18×               |
+| 131,072 | 1.62×          | 2.98×               |
+
+The step rate falls by nearly the same fraction either way (−17.5 % without
+MTP, −18.5 % with it at 128K), which is the bandwidth term and it is common to
+both. What erodes the ratio is the acceptance term, and only for prose.
+
 Practically: a 130K-deep agentic session still decodes prose at ~56 tok/s and
-JSON at ~103 tok/s. The no-MTP baseline was not measured at depth, but the
-bandwidth penalty applies to it identically — it is the same weight-plus-cache
-read — so the MTP speed-up should survive depth largely intact.
+JSON at ~103 tok/s, against ~35 tok/s without MTP at the same depth.
 
 ### Power
 
