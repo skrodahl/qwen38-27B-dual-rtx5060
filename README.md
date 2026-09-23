@@ -167,16 +167,24 @@ JSON at ~103 tok/s, against ~35 tok/s without MTP at the same depth.
 Every k from 0 to 7, same config, same workload, one vLLM restart each.
 `decode` and `decode_depth` stages, fp8 KV, `max-num-seqs 2`, len 262,144.
 
-| k | Steps/s | Prose tok/s | Structured tok/s | Acceptance, prose / structured | KV pool |
-|--:|--------:|------------:|-----------------:|-------------------------------:|--------:|
-| 0 | 41.90   | 41.99       | 42.00            | — (no drafting)                | 351,618 |
-| 1 | 35.94   | 63.55       | 69.83            | 1.78 / 1.95                    | 290,655 |
-| 2 | 33.26   | 74.71       | 94.62            | 2.25 / 2.86                    | 285,321 |
-| 3 | 30.74   | 77.53       | 107.20           | 2.53 / 3.52                    | 284,319 |
-| 4 | 28.57   | **77.73**   | 122.81           | 2.73 / 4.35                    | 278,927 |
-| 5 | 26.77   | 72.14       | 132.93           | 2.70 / 5.03                    | 274,815 |
-| 6 | 25.21   | 72.45       | 132.75           | 2.89 / 5.33                    | 272,533 |
-| 7 | 23.80   | 70.36       | **135.21**       | 2.96 / 5.76                    | 268,596 |
+| k | Steps/s | Prose tok/s | Structured tok/s | Mixed tok/s | Acceptance, prose / structured | KV pool |
+|--:|--------:|------------:|-----------------:|------------:|-------------------------------:|--------:|
+| 0 | 41.90   | 41.99       | 42.00            | 41.85       | — (no drafting)                | 351,618 |
+| 1 | 35.94   | 63.55       | 69.83            | 63.41       | 1.78 / 1.95                    | 290,655 |
+| 2 | 33.26   | 74.71       | 94.62            | 77.54       | 2.25 / 2.86                    | 285,321 |
+| 3 | 30.74   | 77.53       | 107.20           | **83.01**   | 2.53 / 3.52                    | 284,319 |
+| 4 | 28.57   | **77.73**   | 122.81           | 81.61       | 2.73 / 4.35                    | 278,927 |
+| 5 | 26.77   | 72.14       | 132.93           | 79.03       | 2.70 / 5.03                    | 274,815 |
+| 6 | 25.21   | 72.45       | 132.75           | 74.67       | 2.89 / 5.33                    | 272,533 |
+| 7 | 23.80   | 70.36       | **135.21**       | 76.50       | 2.96 / 5.76                    | 268,596 |
+
+**Mixed** is one prompt that answers in prose and then emits a JSON summary —
+the closest stand-in here for a real agent turn. It peaks at **k=3-4**, with
+prose, not at k=5-7 with structured. Treat the column as indicative rather than
+exact: sampling is greedy, so each k produced one fixed output, and the
+reasoning-token counts across these runs ranged from 275 to 616. The shape
+(rise to k=3-4, slow decline after) is consistent across all three workloads,
+but any single cell is one sample.
 
 **The step rate is a straight line in k.** Fitting the measured step times
 gives:
