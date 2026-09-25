@@ -24,7 +24,7 @@ vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
 - [What didn't work, and other gotchas](#what-didnt-work-and-other-gotchas) — 8192 batched tokens, TRITON_ATTN, full CUDA graphs, async scheduling
 - [Tips and tricks](#tips-and-tricks) — what each knob does, and how to test a change without fooling yourself
 - [What would make this faster](#what-would-make-this-faster) — fused draft decode, NVFP4 KV, DSpark
-- [vLLM recipe (Docker Compose)](#vllm-recipe-docker-compose) — the whole config
+- [vLLM recipe (Docker Compose)](#vllm-recipe-docker-compose) — quick start and the whole config
 
 ## Model
 
@@ -35,6 +35,37 @@ Pinned because this is the latest release of the checkpoint that still
 includes the **MTP head**. Later commits don't include it, and without it
 `--speculative-config` MTP won't work: decode drops to the ~42 tok/s no-MTP
 baseline.
+
+**Downloading the pinned commit** (~18.8 GB; public, so no token needed). Use
+the full commit hash. Downloading `main` gets you the build without MTP.
+
+With the Hugging Face CLI (`pip install -U huggingface_hub`, which provides `hf`):
+
+```bash
+hf download gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090 \
+  --revision 0cc27958cefbbe231782ec8511de8c4eb5233348 \
+  --local-dir ~/ai/models/gittensor-NVFP4
+```
+
+With plain `wget`, fetching the file list at that commit:
+
+```bash
+REPO=gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090
+REV=0cc27958cefbbe231782ec8511de8c4eb5233348
+mkdir -p ~/ai/models/gittensor-NVFP4 && cd ~/ai/models/gittensor-NVFP4
+for f in config.json generation_config.json hf_quant_config.json \
+         model.safetensors.index.json model-00001-of-00003.safetensors \
+         model-00002-of-00003.safetensors model-00003-of-00003.safetensors \
+         tokenizer.json tokenizer_config.json vocab.json merges.txt \
+         chat_template.jinja preprocessor_config.json processor_config.json \
+         video_preprocessor_config.json; do
+  wget -c "https://huggingface.co/$REPO/resolve/$REV/$f"
+done
+```
+
+`-c` resumes a partial download, so you can simply rerun the loop if it gets
+interrupted. Or skip the download altogether and let vLLM fetch the pinned
+commit itself (see [the recipe](#vllm-recipe-docker-compose)).
 
 ## Hardware
 
@@ -549,6 +580,54 @@ thousand.
 ## vLLM recipe (Docker Compose)
 
 Stock vLLM 0.30.0, the operating config, adopted 2026-09-22.
+
+**Quick start.** You need the NVIDIA driver, Docker with the Compose plugin,
+and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+```bash
+# 1. Pull the image. The recipe sets pull_policy: never, so Compose won't pull it for you
+docker pull vllm/vllm-openai:v0.30.0
+
+# 2. Get the checkpoint (see "Model" above), or use the --revision variant below
+
+# 3. Save the YAML below as compose.yaml, change /home/user to your own paths
+mkdir -p ~/ai/cache/vllm-stock
+docker compose up -d
+
+# 4. Follow the startup log. The first start compiles CUDA graphs, so it takes a while
+docker compose logs -f
+#    Look for "GPU KV cache size: ... tokens", which should be above 262,144
+
+# 5. Wait for the server to be ready, then send a test request
+until curl -sf localhost:8000/health; do sleep 5; done
+curl -s localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer api-key" -H "Content-Type: application/json" \
+  -d '{"model": "vllm-qwen38-27b", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Change `--api-key` before you expose port 8000 to anything beyond localhost.
+
+**Letting vLLM download the pinned commit instead.** vLLM takes `--revision`,
+so you can pass the Hugging Face repo name and the commit hash and skip the
+manual download. The tokenizer uses the same revision by default. Make these
+changes to the recipe:
+
+```yaml
+    volumes:
+      # replaces the /model mount: the Hugging Face cache, so the download is kept
+      - /home/user/.cache/huggingface:/root/.cache/huggingface
+      - /home/user/ai/cache/vllm-stock:/root/.cache/vllm
+    command:
+      - --model
+      - gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090
+      - --revision
+      - 0cc27958cefbbe231782ec8511de8c4eb5233348
+      # ...everything else unchanged
+```
+
+The first start downloads ~18.8 GB before it loads. `--served-model-name`
+keeps the API model name at `vllm-qwen38-27b` either way. All the measurements
+here were made with the local-folder mount, not this variant.
 
 ```yaml
 services:
