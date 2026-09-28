@@ -674,8 +674,6 @@ services:
       - --disable_custom_all_reduce
       - --api-key
       - api-key
-      - --load-format
-      - ipc_cache
       - --trust-remote-code
       - --kv-cache-dtype
       - fp8
