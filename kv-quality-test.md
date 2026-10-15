@@ -184,7 +184,16 @@ equally true of bf16 against bf16. What it does show is that decode ran without 
 
 ## 5. Reproducing
 
-All scripts live in the project's `kvq/` directory (not in this repository): `run-server.sh` (private vLLM instance on port 8001), `score.py`, `paired.py`, `compare.py`, `gen.py`, `gencmp.py`, plus the raw outputs `results-raw.txt`, `paired-raw.txt`, `reordered-paired-raw.txt`, `gen-results-raw.txt`. Per-position logprob dumps are ~120 MB each and not kept in the repo.
+Scripts and text results are in [`kvq/`](kvq/): `run-server.sh` (private vLLM instance on port 8001), `score.py`,
+`paired.py`, `compare.py`, `gen.py`, `gencmp.py`, and the raw outputs `results-raw.txt` (per-position measures),
+`paired-raw.txt` (paired dNLL, corpus 1), `reordered-paired-raw.txt` (corpus 2) and `gen-results-raw.txt` (decode test).
 
-Procedure, per configuration: start the server with the flags in section 1; `./score.py --corpus <corpus> --tokens 200000 --out <file>`;
-compare two outputs with `./paired.py REF.json TEST.json [lo hi]`.
+**Not included:** the per-position logprob dumps (~120 MB each) and the two corpus files. The corpora contain the
+author's internal project notes (`STATUS.md`), which are not published here. To reproduce, build your own
+`corpus.txt` from any long text (the scripts read `corpus.txt` in the working directory) and expect different absolute
+numbers; the method, not the exact text, is what transfers. The depth/text-type confound in section 3.4 is the reason to
+test with the text order swapped as well.
+
+Procedure, per configuration: start the server with `./run-server.sh <auto|fp8|nvfp4> <kv-cache-memory> <max-model-len> <chunk>`;
+run `./score.py --corpus corpus.txt --tokens 200000 --out <file>`; compare two outputs with
+`./paired.py REF.json TEST.json [lo hi]`. The model path and image tag in `run-server.sh` are this machine's.

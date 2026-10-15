@@ -1,0 +1,20 @@
+ref=gen-bf16.json test=gen-bf16-chunk1024.json
+  prompt   4096: first divergence at token [1, 16, 40, 31, 5, 11]  median 13.5  identical 0/6
+  prompt  32768: first divergence at token [14, 2, 6, 23, 34, 44]  median 18.5  identical 0/6
+  prompt  90000: first divergence at token [5, 1, 5, 6, 7, 18]  median 5.5  identical 0/6
+  ALL: median 9.0, mean 14.9, identical 0/18
+ref=gen-bf16.json test=gen-fp8.json
+  prompt   4096: first divergence at token [15, 15, 38, 31, 5, 11]  median 15.0  identical 0/6
+  prompt  32768: first divergence at token [16, 12, 15, 23, 37, 51]  median 19.5  identical 0/6
+  prompt  90000: first divergence at token [5, 3, 5, 6, 7, 18]  median 5.5  identical 0/6
+  ALL: median 15.0, mean 17.4, identical 0/18
+ref=gen-bf16.json test=gen-nvfp4.json
+  prompt   4096: first divergence at token [15, 15, 6, 8, 5, 18]  median 11.5  identical 0/6
+  prompt  32768: first divergence at token [8, 2, 6, 25, 46, 11]  median 9.5  identical 0/6
+  prompt  90000: first divergence at token [5, 3, 13, 6, 7, 18]  median 6.5  identical 0/6
+  ALL: median 8.0, mean 12.1, identical 0/18
+ref=gen-fp8.json test=gen-nvfp4.json
+  prompt   4096: first divergence at token [17, 15, 6, 8, 6, 11]  median 9.5  identical 0/6
+  prompt  32768: first divergence at token [8, 2, 6, 23, 37, 11]  median 9.5  identical 0/6
+  prompt  90000: first divergence at token [6, 9, 5, 42, 16, 18]  median 12.5  identical 0/6
+  ALL: median 10.0, mean 13.7, identical 0/18

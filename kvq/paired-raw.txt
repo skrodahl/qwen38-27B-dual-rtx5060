@@ -1,0 +1,16 @@
+           fp8-200k-a.json vs bf16-90k-a.json    [1-90000] n= 89999  dNLL +0.00056  95% CI [-0.00194, +0.00303]  ppl x1.0006
+         nvfp4-200k-a.json vs bf16-90k-a.json    [1-90000] n= 89999  dNLL +0.00311  95% CI [+0.00067, +0.00545]  ppl x1.0031
+   bf16-90k-chunk1024.json vs bf16-90k-a.json    [1-90000] n= 89999  dNLL -0.00119  95% CI [-0.00368, +0.00140]  ppl x0.9988
+   bf16-90k-chunk4096.json vs bf16-90k-a.json    [1-90000] n= 89999  dNLL -0.00121  95% CI [-0.00360, +0.00130]  ppl x0.9988
+         nvfp4-200k-a.json vs fp8-200k-a.json    [1-90000] n= 89999  dNLL +0.00255  95% CI [+0.00006, +0.00491]  ppl x1.0026
+         nvfp4-200k-a.json vs fp8-200k-a.json    [90000-200000] n=110000  dNLL +0.00525  95% CI [+0.00282, +0.00765]  ppl x1.0053
+   fp8-200k-chunk1024.json vs fp8-200k-a.json    [1-90000] n= 89999  dNLL -0.00197  95% CI [-0.00472, +0.00083]  ppl x0.9980
+   fp8-200k-chunk1024.json vs fp8-200k-a.json    [90000-200000] n=110000  dNLL +0.00049  95% CI [-0.00186, +0.00279]  ppl x1.0005
+           fp8-200k-a.json vs bf16-90k-a.json    [1-32768] n= 32767  dNLL -0.00387  95% CI [-0.00814, +0.00039]  ppl x0.9961
+         nvfp4-200k-a.json vs bf16-90k-a.json    [1-32768] n= 32767  dNLL +0.00220  95% CI [-0.00223, +0.00630]  ppl x1.0022
+           fp8-200k-a.json vs bf16-90k-a.json    [32768-90000] n= 57232  dNLL +0.00309  95% CI [+0.00037, +0.00603]  ppl x1.0031
+         nvfp4-200k-a.json vs bf16-90k-a.json    [32768-90000] n= 57232  dNLL +0.00363  95% CI [+0.00088, +0.00634]  ppl x1.0036
+         nvfp4-200k-a.json vs fp8-200k-a.json    [90000-131072] n= 41072  dNLL +0.00553  95% CI [+0.00235, +0.00908]  ppl x1.0055
+   fp8-200k-chunk1024.json vs fp8-200k-a.json    [90000-131072] n= 41072  dNLL +0.00035  95% CI [-0.00318, +0.00420]  ppl x1.0004
+         nvfp4-200k-a.json vs fp8-200k-a.json    [131072-200000] n= 68928  dNLL +0.00508  95% CI [+0.00184, +0.00840]  ppl x1.0051
+   fp8-200k-chunk1024.json vs fp8-200k-a.json    [131072-200000] n= 68928  dNLL +0.00057  95% CI [-0.00240, +0.00345]  ppl x1.0006

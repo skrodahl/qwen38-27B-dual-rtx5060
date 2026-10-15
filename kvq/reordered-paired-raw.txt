@@ -1,0 +1,6 @@
+         r-nvfp4-200k.json vs r-fp8-200k.json    [1-89000] n= 88999  dNLL +0.00345  95% CI [+0.00110, +0.00595]  ppl x1.0035
+ r-fp8-200k-chunk1024.json vs r-fp8-200k.json    [1-89000] n= 88999  dNLL +0.00028  95% CI [-0.00239, +0.00275]  ppl x1.0003
+         r-nvfp4-200k.json vs r-fp8-200k.json    [89000-105000] n= 16000  dNLL +0.00028  95% CI [-0.00625, +0.00700]  ppl x1.0003
+ r-fp8-200k-chunk1024.json vs r-fp8-200k.json    [89000-105000] n= 16000  dNLL -0.00051  95% CI [-0.00626, +0.00578]  ppl x0.9995
+         r-nvfp4-200k.json vs r-fp8-200k.json    [105000-200000] n= 95000  dNLL +0.00197  95% CI [-0.00042, +0.00439]  ppl x1.0020
+ r-fp8-200k-chunk1024.json vs r-fp8-200k.json    [105000-200000] n= 95000  dNLL +0.00054  95% CI [-0.00201, +0.00298]  ppl x1.0005
