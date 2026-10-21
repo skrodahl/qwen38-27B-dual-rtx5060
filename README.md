@@ -1,23 +1,28 @@
-# Qwen 3.8 27B NVFP4 with FP8 KV cache on vLLM 0.30.0
+# Qwen 3.8 27B NVFP4 with NVFP4 KV cache on vLLM 0.32.0
 
 **A 27B model with its full 262K context on two midrange 16 GB cards: stock
-vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
+vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output
+(measured with fp8 KV; NVFP4 KV runs within about 5 % of that).**
 
-- **What:** Qwen 3.8 27B (NVFP4 weights, FP8 KV cache) on 2 × RTX 5060 Ti,
+- **What:** Qwen 3.8 27B (NVFP4 weights, NVFP4 KV cache) on 2 × RTX 5060 Ti,
   tensor parallel, with MTP speculative decoding, on a headless Ubuntu 26.04
   box.
-- **How:** the official vLLM 0.30.0 Docker image and one Compose file. The full
+- **How:** the official vLLM 0.32.0 Docker image and one Compose file. The full
   recipe is at the bottom. The tuning that matters is `max-num-batched-tokens
   4096`, FlashInfer autotune off, and MTP k=4.
 - **Why:** to show that full-context agentic work doesn't need a 5090. It's
   verified with a 250K needle test, measured against a no-MTP baseline, and
   comes with the gotchas that cost context or crash the server.
-- **Update 2026-10-21:** NVFP4 KV cache is now in a tagged release, **vLLM
-  0.32.0** (2026-10-18). It grows the KV pool by 70 % (measured on the
-  pre-release nightly), and it makes **KV offload to host RAM** worth
-  having. The tables below are still fp8 on 0.30.0; the NVFP4 and offload
-  results are in [What would make this faster](#what-would-make-this-faster),
-  and the recipe has a commented-out switch for both.
+- **NVFP4 vs FP8 KV, in short:** NVFP4 KV (in vLLM 0.32.0, 2026-10-18) gives a
+  **+70 % KV pool** (474,032 vs 278,927 tokens) for about **−5 % steps/s**, and
+  costs roughly **0.2-0.5 % perplexity** against bf16, with FP8 indistinguishable
+  from bf16: see the [KV-cache quality test](kv-quality-test.md). It also makes
+  **KV offload to host RAM** worth having; the recipe has a commented-out block.
+- **Which numbers are which:** the decode, depth and k-sweep tables below were
+  measured with **FP8 KV on vLLM 0.30.0**, the baseline. The NVFP4 and offload
+  results, and the quality test, were measured on the **pre-release nightly**
+  (v0.32.0rc1.dev100), same code as the tagged 0.32.0 for this feature. See
+  [What would make this faster](#what-would-make-this-faster).
 
 ## Contents
 
@@ -93,11 +98,11 @@ commit itself (see [the recipe](#vllm-recipe-docker-compose)).
 | Kernel        | 7.0.0-31-generic     |
 | NVIDIA driver | 595.91.07            |
 | CUDA          | 13.2                 |
-| vLLM          | 0.30.0 (official `vllm/vllm-openai:v0.30.0` image, stock, no patches) |
+| vLLM          | 0.32.0 recipe (official `vllm/vllm-openai:v0.32.0` image, stock, no patches); fp8 baseline tables measured on 0.30.0, NVFP4 results on the 0.32.0 nightly |
 
 ## Performance
 
-All runs: vLLM 0.30.0, fp8 KV cache, `max-num-seqs 2`, `max-model-len 262,144`.
+All runs in this section (the fp8 baseline): vLLM 0.30.0, fp8 KV cache, `max-num-seqs 2`, `max-model-len 262,144`.
 
 ### Decode speed
 
@@ -479,9 +484,9 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 | `async-scheduling` | off | no effect at `max-num-seqs 2` |
 | `max-num-seqs` | 2 | higher collapses per-stream rate on these cards (measured outside this repo) |
 | `flashinfer-autotune` | off | on: OOMs on vLLM after 0.28.0 |
-| `gpu-memory-utilization` | 0.95 | above 0.91 OOMs *if* batched tokens is 8192 |
-| `kv-cache-dtype` | fp8 | bf16 roughly doubles KV bytes/token; 262K would not fit. nvfp4 (vLLM 0.32.0+): +70 % pool, −5 % steps/s, see "What would make this faster" |
-| KV offload to RAM | off | commented-out block in the recipe; needs nvfp4 KV as measured, 24 GiB RAM |
+| `gpu-memory-utilization` | 0.94 (nvfp4; fp8 ran 0.95) | above 0.91 OOMs *if* batched tokens is 8192 |
+| `kv-cache-dtype` | nvfp4 | fp8 (the baseline in the tables): 278,927-token pool instead of 474,032, ~5 % more steps/s; bf16 roughly doubles KV bytes/token vs fp8 and 262K would not fit |
+| KV offload to RAM | off | commented-out block in the recipe; measured with nvfp4 KV, needs 24 GiB RAM |
 
 **Method — how to test a change without fooling yourself:**
 
@@ -590,6 +595,11 @@ What this shows:
   4,172-4,333). The -10 % in the table only shows up at 250K, so whatever costs the time
   grows with context. Attention taking a larger share of the prefill at depth would fit,
   but I have not profiled it. Each figure is one prompt per depth, on different builds.
+- **Quality cost is measured.** The [KV-cache quality test](kv-quality-test.md)
+  compares bf16, FP8 and NVFP4 KV on this model: FP8 is indistinguishable from
+  bf16, NVFP4 costs roughly 0.2-0.5 % perplexity (0.002-0.005 nats/token), and the
+  shift does not grow with context depth in that data. It covers one model, one
+  GPU pair and one build, so it is not a general statement about KV quantization.
 - **Correctness at depth held.** The 250K needle passed twice (k=4 and k=5), with
   no Xid and no container restart. Upstream's own SM120 accuracy evidence is one
   third-party GSM8K run at short context (0.962 NVFP4, 0.962 FP8).
@@ -729,14 +739,15 @@ thousand.
 
 ## vLLM recipe (Docker Compose)
 
-Stock vLLM 0.30.0, the operating config, adopted 2026-09-22.
+Stock vLLM 0.32.0 with NVFP4 KV, the operating config. (The fp8 baseline on
+0.30.0, adopted 2026-09-22, is the fallback described below the quick start.)
 
 **Quick start.** You need the NVIDIA driver, Docker with the Compose plugin,
 and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
 # 1. Pull the image. The recipe sets pull_policy: never, so Compose won't pull it for you
-docker pull vllm/vllm-openai:v0.30.0
+docker pull vllm/vllm-openai:v0.32.0
 
 # 2. Get the checkpoint (see "Model" above), or use the --revision variant below
 
@@ -757,20 +768,16 @@ curl -s localhost:8000/v1/chat/completions \
 
 Change `--api-key` before you expose port 8000 to anything beyond localhost.
 
-**Switching on NVFP4 KV and KV offload.** The recipe below is the measured fp8
-config on 0.30.0. NVFP4 KV needs vLLM 0.32.0 or later, and offload was only
-measured together with NVFP4 KV, so the two go on as a pair. (The pair was
-measured on the nightly, not on the tagged 0.32.0 image; see section 2 of
-"What would make this faster".) In the YAML:
+**Switching on KV offload.** The recipe below runs NVFP4 KV without offload,
+the measured 474,032-token pool. Offload (see "What would make this faster",
+section 2b) is a commented-out block. In the YAML:
 
-1. `image:` → `vllm/vllm-openai:v0.32.0` (and `docker pull` it).
-2. `--kv-cache-dtype` → `nvfp4` instead of `fp8`.
-3. Comment out `--gpu_memory_utilization` and `"0.95"`, and uncomment the
+1. Comment out `--gpu_memory_utilization` and `"0.94"`, and uncomment the
    `--kv-cache-memory` line: it sets KV bytes per GPU directly and skips
    profiling. Don't use both.
-4. Uncomment the `ulimits:` block (pinned transfers) and the
+2. Uncomment the `ulimits:` block (pinned transfers) and the
    `--enable-cumem-allocator` and `--kv-offloading-*` lines.
-5. `docker compose up -d`, read `GPU KV cache size` in the log (see
+3. `docker compose up -d`, read `GPU KV cache size` in the log (see
    "Method"), then run a deep prefill (32K, then ~250K) before trusting it.
    A clean boot proves nothing; a too-high `--kv-cache-memory` OOMs on the
    first deep request.
@@ -778,8 +785,12 @@ measured on the nightly, not on the tagged 0.32.0 image; see section 2 of
 To size it for your machine: `--kv-offloading-size` is GiB of host RAM, total,
 so leave room for the OS and the model server. `--kv-cache-memory` is bytes
 per GPU; `4900000000` suits 16 GB cards at 262K, and lower it if a deep
-prefill OOMs. To go back, re-comment the block and restore the two lines you
-changed.
+prefill OOMs. To go back, re-comment the block.
+
+**Falling back to fp8.** Set `--kv-cache-dtype` to `fp8` and
+`--gpu_memory_utilization` to `0.95`. That is the baseline in the tables above
+(278,927-token pool, 1.06x at 262K). It also works on older vLLM, where NVFP4 KV
+does not exist: the fp8 tables were measured on 0.30.0.
 
 **Letting vLLM download the pinned commit instead.** vLLM takes `--revision`,
 so you can pass the Hugging Face repo name and the commit hash and skip the
@@ -807,7 +818,7 @@ here were made with the local-folder mount, not this variant.
 services:
   vllm-qwen38-27b:
     # Image pinned, for reference and to avoid version drift
-    image: vllm/vllm-openai:v0.30.0
+    image: vllm/vllm-openai:v0.32.0
     # Comment this line out if pulling a new version is required.
     pull_policy: never
     container_name: vllm-qwen38-27b
@@ -855,12 +866,12 @@ services:
       - --load-format
       - ipc_cache
       - --trust-remote-code
-      # nvfp4 needs vLLM >= 0.32.0 (see "Switching on NVFP4 KV and KV offload")
+      # nvfp4 needs vLLM >= 0.32.0; fp8 is the fallback (see "Falling back to fp8")
       - --kv-cache-dtype
-      - fp8
-      # 262144 is the project's target, and it FITS on stock fp8:
-      # at gpu-memory-utilization=0.95 with MTP k=4, GPU KV cache size:
-      # 278,927 tokens, maximum concurrency for 262,144 per request: 1.06x
+      - nvfp4
+      # 262144 is the project's target. With nvfp4 at gpu-memory-utilization
+      # 0.94 and MTP k=4: GPU KV cache size 474,032 tokens, 1.81x at 262,144.
+      # (fp8 at 0.95: 278,927 tokens, 1.06x.)
       - --max-model-len
       - "262144"
       # --max-num-seqs 2 since 2026-09-01. Was 1; the comment below is kept
@@ -880,9 +891,9 @@ services:
       - --mamba-ssm-cache-dtype
       - bfloat16
       - --gpu_memory_utilization
-      - "0.95"
+      - "0.94"
       # --- KV offload to host RAM: OPTIONAL, off by default ---
-      # Needs nvfp4 KV (above). Replaces gpu_memory_utilization: comment that
+      # Replaces gpu_memory_utilization: comment that
       # one out and uncomment this block. Also uncomment ulimits (top).
       # Measured pool: 450,942 tokens. Validate with a 32K prefill, then the 250K needle.
       #- --kv-cache-memory
