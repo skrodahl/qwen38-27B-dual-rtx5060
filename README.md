@@ -1,6 +1,5 @@
-# Qwen 3.8 27B NVFP4 with NVFP4 KV cache on vLLM 0.32.0
+# Qwen 3.8 27B on dual RTX 5060 Ti 16GB
 
-* **Qwen 3.8 27B on two RTX 5060 Ti 16GB**
 * **Up to 125 tok/s decode speed**
 * **~475,000 tokens of KV cache** (full 262K context, twice over)
 * **KV offloading: evicted sessions resume in seconds, not minutes**
