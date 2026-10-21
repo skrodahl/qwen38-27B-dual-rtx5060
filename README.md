@@ -398,12 +398,17 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 
 ## What didn't work, and other gotchas
 
+**These were all measured with fp8 KV on vLLM 0.30.0**, where the KV pool was
+~279K tokens. Pool sizes and "caps context" effects below are fp8 numbers; with
+NVFP4 KV the pool is ~474K and they have not been re-measured.
+
 - **`--max-num-batched-tokens 8192`.** It makes the vLLM warning about
   speculative decoding and `max_num_scheduled_tokens` go away, but it gives no
   measurable speed gain: TTFT and decode are the same as at 4096. It needs more
-  activation memory, which costs context: at 8192 anything above
-  `gpu-memory-utilization 0.91` OOMs, and 0.91 fits 200K (KV pool 201,562),
-  against 262K at 0.95 with 4096. The
+  activation memory, which costs context: at fp8, anything above
+  `gpu-memory-utilization 0.91` OOMs at 8192, and 0.91 fits 200K (KV pool 201,562),
+  against 262K at 0.95 with 4096. (Not re-measured with NVFP4, whose pool is much
+  larger, so whether the context cap applies there is unknown.) The
   warning says "*may* lead to suboptimal performance", and at `max-num-seqs 2`
   it doesn't: 2 sequences × 7 draft slots is 14 of the 4096 per step.
 - **FlashInfer autotune** OOMs on vLLM versions after 0.28.0. Use
@@ -490,18 +495,19 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 
 ## Tips and tricks
 
-**What each knob does, if you change it from this recipe:**
+**What each knob does, if you change it from this recipe.** Effects on the
+KV pool are fp8 numbers (0.30.0) unless marked; the NVFP4 pool is larger.
 
 | Knob | Here | Change it and… |
 |------|------|----------------|
-| `max-num-batched-tokens` | 4096 | 8192 buys no speed and caps context at 200K |
+| `max-num-batched-tokens` | 4096 | 8192 buys no speed; at fp8 it capped context at 200K (not re-measured with NVFP4) |
 | MTP `num_speculative_tokens` | 4 | prose peaks at 4; structured keeps rising to 7; see "Choosing k" |
-| `cudagraph_mode` | PIECEWISE | FULL_AND_PIECEWISE: +2.4 % steps/s, no tok/s gain, −3,197 pool |
-| attention backend | FlashInfer (default) | TRITON_ATTN: −33 % at 32K, −64 % at 131K |
+| `cudagraph_mode` | PIECEWISE | FULL_AND_PIECEWISE: +2.4 % steps/s, no tok/s gain, −3,197 pool (fp8) |
+| attention backend | FlashInfer (default) | TRITON_ATTN: −33 % at 32K, −64 % at 131K (fp8; not tried with NVFP4) |
 | `async-scheduling` | off | no effect at `max-num-seqs 2` |
 | `max-num-seqs` | 2 | higher collapses per-stream rate on these cards (measured outside this repo) |
 | `flashinfer-autotune` | off | on: OOMs on vLLM after 0.28.0 |
-| `gpu-memory-utilization` | 0.94 (nvfp4; fp8 ran 0.95) | above 0.91 OOMs *if* batched tokens is 8192 |
+| `gpu-memory-utilization` | 0.94 (nvfp4; fp8 ran 0.95) | at fp8, above 0.91 OOMs *if* batched tokens is 8192 |
 | `kv-cache-dtype` | nvfp4 | fp8 (the baseline in the tables): 278,927-token pool instead of 474,032, ~5 % more steps/s; bf16 roughly doubles KV bytes/token vs fp8 and 262K would not fit |
 | KV offload to RAM | off | commented-out block in the recipe; measured with nvfp4 KV, needs 24 GiB RAM |
 
@@ -900,7 +906,8 @@ services:
       - --max-num-seqs
       - "2"
       # PIECEWISE, not FULL_AND_PIECEWISE: the latter was measured and gave
-      # +2.4% steps/s but no tok/s gain, for 3,197 tokens of pool. See gotchas.
+      # +2.4% steps/s but no tok/s gain, for 3,197 tokens of pool (measured at
+      # fp8). See gotchas.
       - --compilation-config
       - '{"cudagraph_mode": "PIECEWISE"}'
       - --mamba-cache-dtype
