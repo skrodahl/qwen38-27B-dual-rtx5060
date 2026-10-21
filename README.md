@@ -12,6 +12,12 @@ vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
 - **Why:** to show that full-context agentic work doesn't need a 5090. It's
   verified with a 250K needle test, measured against a no-MTP baseline, and
   comes with the gotchas that cost context or crash the server.
+- **Update 2026-10-21:** NVFP4 KV cache is now in a tagged release, **vLLM
+  0.32.0** (2026-10-18). It grows the KV pool by 70 % (measured on the
+  pre-release nightly), and it makes **KV offload to host RAM** worth
+  having. The tables below are still fp8 on 0.30.0; the NVFP4 and offload
+  results are in [What would make this faster](#what-would-make-this-faster),
+  and the recipe has a commented-out switch for both.
 
 ## Contents
 
@@ -23,8 +29,8 @@ vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output.**
   - [Power](#power) · [Long context: 250K needle test](#long-context-250k-needle-test) · [Time to first token](#time-to-first-token)
 - [What didn't work, and other gotchas](#what-didnt-work-and-other-gotchas) — 8192 batched tokens, TRITON_ATTN, full CUDA graphs, async scheduling
 - [Tips and tricks](#tips-and-tricks) — what each knob does, and how to test a change without fooling yourself
-- [What would make this faster](#what-would-make-this-faster) — fused draft decode, NVFP4 KV, DSpark
-- [vLLM recipe (Docker Compose)](#vllm-recipe-docker-compose) — quick start and the whole config
+- [What would make this faster](#what-would-make-this-faster) — fused draft decode, NVFP4 KV (in 0.32.0, measured on nightly), KV offload to RAM, DSpark
+- [vLLM recipe (Docker Compose)](#vllm-recipe-docker-compose) — quick start and the whole config, with commented-out NVFP4 KV + offload
 
 ## Model
 
@@ -74,7 +80,7 @@ commit itself (see [the recipe](#vllm-recipe-docker-compose)).
 | CPU         | AMD Ryzen 7 9800X3D         |
 | GPUs        | 2 × RTX 5060 Ti 16 GB       |
 | Motherboard | MSI MPG X670E CARBON WIFI   |
-| RAM         | 32 GB DDR5-6000             |
+| RAM         | 64 GB DDR5                  |
 | Storage     | NVMe Gen4                   |
 | PCIe        | Gen5 x8 / x8 (cards are x8 electrically; GPU0 sits in an x16 slot) |
 | GPU power   | Capped at 150 W per card (stock max 198 W) |
@@ -474,7 +480,8 @@ Prompts of different lengths, showing how the prefill rate holds up with depth.
 | `max-num-seqs` | 2 | higher collapses per-stream rate on these cards (measured outside this repo) |
 | `flashinfer-autotune` | off | on: OOMs on vLLM after 0.28.0 |
 | `gpu-memory-utilization` | 0.95 | above 0.91 OOMs *if* batched tokens is 8192 |
-| `kv-cache-dtype` | fp8 | bf16 roughly doubles KV bytes/token; 262K would not fit |
+| `kv-cache-dtype` | fp8 | bf16 roughly doubles KV bytes/token; 262K would not fit. nvfp4 (vLLM 0.32.0+): +70 % pool, −5 % steps/s, see "What would make this faster" |
+| KV offload to RAM | off | commented-out block in the recipe; needs nvfp4 KV as measured, 24 GiB RAM |
 
 **Method — how to test a change without fooling yourself:**
 
@@ -535,13 +542,156 @@ would be worth re-running the day FlashInfer declares support. Switching to a
 backend that already has it is not the answer — see TRITON_ATTN under "What
 didn't work".
 
-**2. NVFP4 KV cache for GDN models.** The KV cache is fp8 here, ~16.3 KiB per
-token per GPU. NVFP4 would roughly halve that. Two consequences, both visible in
-the tables above: the pool would grow far past 262K, so several full-context
-sessions could be resident at once; and the step-rate decay at depth would
-shrink, because every decode step re-reads the whole cache (−18 % steps/s at
-131K is *the* reason decode slows down at depth). Not supported for this model's
-GDN layers in vLLM today.
+**2. NVFP4 KV cache for GDN models. NOW IN vLLM 0.32.0 (released 2026-10-18).**
+Everything above is fp8 KV on vLLM 0.30.0, ~16.3 KiB per token per GPU. As of
+[PR #60452](https://github.com/vllm-project/vllm/pull/60452) (merged 2026-10-10,
+"Decode an NVFP4 KV cache with XQA on SM12x") NVFP4 KV decodes through FlashInfer
+XQA on this card family. It is **not in the 0.30.0 image used for the tables
+above**. It is in the tagged
+[v0.32.0 release](https://github.com/vllm-project/vllm/releases/tag/v0.32.0), whose
+notes list it under "Low-precision KV cache everywhere" (#46963 for SM8x/SM12x
+support, #60452 for XQA decode on SM12x).
+
+**Everything measured below was done on the nightly image**
+(`vllm/vllm-openai:nightly`, v0.32.0rc1.dev100, before the release), **not on the
+tagged 0.32.0 image.** The feature is the same code, but I have not re-run these
+tables on the release.
+
+Measured on that nightly with `--kv-cache-dtype nvfp4`,
+`gpu-memory-utilization 0.94`, MTP k=4, `max-num-seqs 2`, `max-model-len 262,144`.
+The fp8 run differs in more than the KV dtype: vLLM 0.30.0 against the nightly,
+NVIDIA driver 595.91.07 against 595.99.02, kernel 7.0.0-31 against -38, and
+utilization 0.95 against 0.94. This is a build comparison, not a controlled
+KV-dtype experiment. The fp8 comparison is the profiler run
+of 2026-09-30 on 0.30.0 (same workload version, k=4); it is **not** the table
+under "Decode speed", which came from an earlier workload.
+
+| | fp8, 0.30.0 | NVFP4, nightly | |
+|---|---:|---:|---|
+| KV cache pool | 278,927 tok | **474,032 tok** | +70 % |
+| Concurrency at 262,144 | 1.06x | **1.81x** | |
+| Decode step time (p50) | 35.0 ms | 36.9 ms | +5 % |
+| Steps/s | 28.5 | 27.1 | −5 % |
+| Structured tok/s | 89.7 | 90.6 | +1 % |
+| 250K needle | passed (246.7 s, 1,011 tok/s)¹ | **passed** (274.8 s, 912.7 tok/s) | prefill −10 % |
+
+¹ From "Long context" below; 249,450 tokens at k=6, so prefill-only and
+comparable. A second NVFP4 run at k=5 recovered the same passphrase
+(250,414 tokens, 272.2 s).
+
+What this shows:
+
+- **The pool is the win.** 474K tokens holds nearly two full 262K contexts.
+  Steps/s is a few per cent lower at depth 0, which is the price.
+- **The prefill gap is a depth effect.** At ~32.7K tokens NVFP4 prefilled at
+  3,051 tok/s (k=4) and 3,056 tok/s (k=5), against 3,025-3,105 tok/s across the fp8
+  `ttft_sweep` runs of 2026-09-22 to 2026-10-02 (0.30.0 and 0.30.1rc1, k=4/5/6), which is
+  inside their run-to-run spread. The same holds at ~4K (4,093-4,178 against
+  4,172-4,333). The -10 % in the table only shows up at 250K, so whatever costs the time
+  grows with context. Attention taking a larger share of the prefill at depth would fit,
+  but I have not profiled it. Each figure is one prompt per depth, on different builds.
+- **Correctness at depth held.** The 250K needle passed twice (k=4 and k=5), with
+  no Xid and no container restart. Upstream's own SM120 accuracy evidence is one
+  third-party GSM8K run at short context (0.962 NVFP4, 0.962 FP8).
+- **Step-rate decay at depth looks smaller, not proven.** At k=4, steps/s goes
+  27.1 → 26.2 → 23.6 at 0 / 32K / 131K, which is −13 % at 131K, against −18 % for
+  fp8 in "Decode at depth". Different builds and dates, so treat it as a lead.
+- **Prose tok/s is not comparable between runs.** In the NVFP4 run the prose
+  prompt spent all 800 tokens reasoning; in the fp8 run it spent 202 and then
+  answered. Acceptance moves with content, so only step time and the structured
+  rows are quoted above. Mean acceptance read 2.72 against 2.94 (−7.5 %); that
+  may be content, or NVFP4 rounding in the KV, and this run cannot separate them.
+- **Heat under the 250K prefill:** peak 82 / 81 °C at 43–47 % fan, 128–131 W per
+  card, 93–96 % of samples unthrottled. No fp8 run of the same stage exists to
+  compare against.
+
+**2b. KV offload to host RAM works with NVFP4 KV (2026-10-14/15).**
+vLLM's native CPU offload keeps evicted KV blocks in system RAM, so a session that
+was pushed out of the GPU pool restores in seconds instead of being prefilled again.
+It works on this hybrid (Gated DeltaNet) NVFP4 model, with the NVFP4 KV cache and MTP
+k=4 on. Measured on the same nightly as above.
+
+**What it is for.** A bigger pool (section 2) lets more sessions stay resident on
+the GPU. Offload covers the case where that still isn't enough: when a session
+is evicted from the pool by newer work, its KV blocks go to host RAM instead of
+being thrown away, and coming back to it costs a copy (~2.6 s for 93K tokens)
+instead of a fresh prefill (~50 s). It pays off if you juggle several long
+sessions (agents, subagents, a few chats left open) on one server, and does
+nothing if everything you do fits in the pool anyway. It is not persistence:
+RAM only, so a container restart empties it. It needs spare host RAM (24 GiB
+below) and a little GPU memory for the connector, which is why the pool shrinks
+slightly (below). The recipe at the bottom has it as a commented-out block.
+
+The flags, added to the `command:` list of the recipe:
+
+```yaml
+      - --kv-cache-memory
+      - "4900000000"            # bytes of KV per GPU; see "Sizing" below
+      - --enable-cumem-allocator
+      - --kv-offloading-backend
+      - native
+      - --kv-offloading-size
+      - "24"                    # GiB of host RAM, total
+```
+
+and, at service level, `ulimits: { memlock: -1 }` (see "Pinning").
+
+What was measured (restore tests, `n=1` per row unless noted):
+
+| Prompt | Cold prefill | Restored from offload | Output |
+|---|---:|---:|---|
+| ~46K tokens (pool 72K) | 17.5 s | 1.67 s | byte-identical, 2 of 2 |
+| ~93K tokens (pool 109K) | 49.9 s | 2.63 s | byte-identical |
+| ~93K tokens (pool 423,776) | 49.6 s | 2.6 s | byte-identical |
+
+- **Cost:** the store side was 7-30 ms per 10 s window in normal use, so effectively
+  free. KV is ~20.5 KB per token across both GPUs, so 24 GiB holds roughly 1.26M tokens.
+- **RAM only:** a container restart empties it. Nothing survives a restart.
+- **At 250K:** the needle test passed with offload on (249,823 tokens, correct
+  passphrase), and so did two concurrent ~200K requests (both needles correct,
+  1,064 tok/s aggregate).
+
+**Sizing.** `--kv-cache-memory` skips memory profiling, and the offload connector
+takes GPU memory of its own, so a value that works without it can fail with it.
+`5120000000` passed the 250K needle without offload. With offload it **boots cleanly
+and then OOMs on the first deep prefill** (93K in my test, GPU 1 down to 92 MiB free),
+so a clean start proves nothing: always run a deep prefill before trusting a value. The
+startup log's own suggestion ("--kv-cache-memory=5484572672 to fully utilize gpu memory")
+did the same thing even without offload: started in ~40 s, then CUDA-OOMed on a 32K
+prefill. Do not use it. Gate any value on a 32K prefill first, then the 250K needle.
+
+For reference, `5120000000` is what normal profiling picked at
+`--gpu-memory-utilization 0.94` (pool 471,315 vs 474,032, -0.6 %), and setting it
+directly cut startup from ~2 min to ~40 s.
+
+| `--kv-cache-memory` | KV pool | Concurrency at 262,144 | Free at 250K prefill peak |
+|---:|---:|---:|---|
+| 4,600,000,000 | 423,776 | 1.62x | not recorded |
+| 4,900,000,000 | 450,942 | 1.72x | ~580 MiB per card |
+
+Both passed the 250K needle. The pool is smaller than the 474,032 tokens in the table
+above, which is the no-offload run.
+
+**Gotchas.**
+
+- Any KV connector refuses `expandable_segments` unless `--enable-cumem-allocator` is
+  on. The recipe sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, so you need both.
+- **Pinning.** Docker's default locked-memory limit is 8 MiB, and with it vLLM logs
+  `cudaHostRegister failed (code=1)`: transfers still work, but the offload region
+  stays pageable (unpinned DMA). `ulimits: memlock: -1` fixes that. The restore times
+  above were measured **before** that fix, and the 4.9e9 runs after it. I have not
+  re-measured restore speed pinned.
+- `VLLM_SERVER_DEV_MODE=1` exposes endpoints such as `/reset_prefix_cache` **without
+  the API key** on the listening port. I used it to force evictions in testing; do not
+  leave it on.
+- Needs host RAM: 24 GiB for the offload pool. On a 60 GB machine, about 21 GiB stayed
+  available with the model loaded and offload pinned.
+
+**LMCache did not work.** LMCache 0.5.5 (the version in the nightly image), run as a
+sidecar, booted fine on this model but returned looping garbage on every restore, from
+both its RAM tier and its disk tier. A control run without the connector was correct.
+I suspect it does not handle NVFP4 KV on a hybrid model, but I did not isolate the cause
+and did not report it upstream. Native offload does not have this problem.
 
 **3. The DSpark draft head — TRIED 2026-09-23, does not load on vLLM 0.30.0.**
 The checkpoint here is pinned to the last release that includes the MTP head;
@@ -607,6 +757,30 @@ curl -s localhost:8000/v1/chat/completions \
 
 Change `--api-key` before you expose port 8000 to anything beyond localhost.
 
+**Switching on NVFP4 KV and KV offload.** The recipe below is the measured fp8
+config on 0.30.0. NVFP4 KV needs vLLM 0.32.0 or later, and offload was only
+measured together with NVFP4 KV, so the two go on as a pair. (The pair was
+measured on the nightly, not on the tagged 0.32.0 image; see section 2 of
+"What would make this faster".) In the YAML:
+
+1. `image:` → `vllm/vllm-openai:v0.32.0` (and `docker pull` it).
+2. `--kv-cache-dtype` → `nvfp4` instead of `fp8`.
+3. Comment out `--gpu_memory_utilization` and `"0.95"`, and uncomment the
+   `--kv-cache-memory` line: it sets KV bytes per GPU directly and skips
+   profiling. Don't use both.
+4. Uncomment the `ulimits:` block (pinned transfers) and the
+   `--enable-cumem-allocator` and `--kv-offloading-*` lines.
+5. `docker compose up -d`, read `GPU KV cache size` in the log (see
+   "Method"), then run a deep prefill (32K, then ~250K) before trusting it.
+   A clean boot proves nothing; a too-high `--kv-cache-memory` OOMs on the
+   first deep request.
+
+To size it for your machine: `--kv-offloading-size` is GiB of host RAM, total,
+so leave room for the OS and the model server. `--kv-cache-memory` is bytes
+per GPU; `4900000000` suits 16 GB cards at 262K, and lower it if a deep
+prefill OOMs. To go back, re-comment the block and restore the two lines you
+changed.
+
 **Letting vLLM download the pinned commit instead.** vLLM takes `--revision`,
 so you can pass the Hugging Face repo name and the commit hash and skip the
 manual download. The tokenizer uses the same revision by default. Make these
@@ -639,6 +813,10 @@ services:
     container_name: vllm-qwen38-27b
     restart: unless-stopped
     ipc: host
+    # KV offload (optional, see "Switching on NVFP4 KV and KV offload"):
+    # lifts Docker's 8 MiB locked-memory limit so the RAM region can be pinned.
+    #ulimits:
+    #  memlock: -1
     ports:
       - 8000:8000
     volumes:
@@ -674,7 +852,10 @@ services:
       - --disable_custom_all_reduce
       - --api-key
       - api-key
+      - --load-format
+      - ipc_cache
       - --trust-remote-code
+      # nvfp4 needs vLLM >= 0.32.0 (see "Switching on NVFP4 KV and KV offload")
       - --kv-cache-dtype
       - fp8
       # 262144 is the project's target, and it FITS on stock fp8:
@@ -700,6 +881,17 @@ services:
       - bfloat16
       - --gpu_memory_utilization
       - "0.95"
+      # --- KV offload to host RAM: OPTIONAL, off by default ---
+      # Needs nvfp4 KV (above). Replaces gpu_memory_utilization: comment that
+      # one out and uncomment this block. Also uncomment ulimits (top).
+      # Measured pool: 450,942 tokens. Validate with a 32K prefill, then the 250K needle.
+      #- --kv-cache-memory
+      #- "4900000000"       # bytes of KV per GPU; lower it if a deep prefill OOMs
+      #- --enable-cumem-allocator
+      #- --kv-offloading-backend
+      #- native
+      #- --kv-offloading-size
+      #- "24"               # GiB of host RAM, total
       - --max-num-batched-tokens
       - "4096"
       - --enable-prefix-caching
