@@ -4,6 +4,30 @@
 vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output
 (measured with fp8 KV; NVFP4 KV runs within about 5 % of that).**
 
+## Highlights
+
+- **Hardware:** two RTX 5060 Ti 16 GB, tensor parallel. Midrange consumer cards, no 5090.
+- **Model:** Qwen 3.8 27B, NVFP4 weights, NVFP4 KV cache, MTP speculative decoding (k=4).
+- **Speed:** decode up to **125 tok/s** on structured output (JSON, code, tool calls),
+  **78 tok/s** on prose, against 42 tok/s with MTP off. Measured with fp8 KV;
+  NVFP4 KV runs within about 5 %. About 4 % lower with the 2500 MHz clock cap
+  the rig now uses (see [Power](#power)).
+- **Context:** the full **262K** window, with a KV cache of about **475K tokens**
+  (1.81× the window), so nearly two full-context sessions fit at once.
+  (About 451K with KV offload switched on.)
+- **Checked, not assumed:** a 250K needle test, a bf16 / FP8 / NVFP4
+  [KV quality comparison](kv-quality-test.md) (NVFP4 costs roughly 0.2-0.5 %
+  perplexity), and a full MTP sweep from k=0 to 7.
+- **Optional:** KV offload to host RAM, so a session pushed out of the GPU
+  comes back in seconds instead of being prefilled again. A commented-out block in the recipe.
+- **Stock and reproducible:** the official vLLM 0.32.0 Docker image and one
+  Compose file. No patches.
+
+**Who it's for:** anyone who wants long-context agentic or coding work on
+mid-range consumer GPUs and is comfortable with Docker and vLLM. It is tuned for
+**one user, or a few streams** (`max-num-seqs 2`); more concurrent streams make
+the per-stream rate collapse on these cards, so it is not a many-user server.
+
 - **What:** Qwen 3.8 27B (NVFP4 weights, NVFP4 KV cache) on 2 × RTX 5060 Ti,
   tensor parallel, with MTP speculative decoding, on a headless Ubuntu 26.04
   box.
