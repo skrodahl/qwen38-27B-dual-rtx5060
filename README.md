@@ -89,6 +89,7 @@ commit itself (see [the recipe](#vllm-recipe-docker-compose)).
 | Storage     | NVMe Gen4                   |
 | PCIe        | Gen5 x8 / x8 (cards are x8 electrically; GPU0 sits in an x16 slot) |
 | GPU power   | Capped at 150 W per card (stock max 198 W) |
+| GPU clock   | Uncapped for the tables below; since 2026-10-14 the rig runs with a 2500 MHz cap (see [Power](#power)) |
 
 ## Software
 
@@ -349,6 +350,17 @@ before any JSON appears. k=5-7 is the choice only for output that is
 overwhelmingly structured.
 
 ### Power
+
+**Clock cap (added 2026-10-14).** To keep the cards cooler and the fans quieter
+under long prefills, the rig now locks the SM clock to 2500 MHz
+(`nvidia-smi -lgc 300,2500`; 150 W is already the power floor, so the clock is
+the only lever left). It costs speed: about **4 % on decode** (38.7 vs 37.2 ms
+per step) and **5.6 % on prefill** (2,880 vs 3,051 tok/s at a cold 32K), from
+one back-to-back flip of the cap, n=1 each. **The decode, depth, k-sweep, NVFP4
+and 250K needle tables were measured before the cap, uncapped.** In section 2b,
+the restore timings were also taken before the cap, while the 250K needle at
+4.6e9 and 4.9e9 and the concurrent 2 × 200K test were run with it on. Expect roughly 4 % lower decode than the tables on
+the capped rig.
 
 The 150 W cap does not limit decode: the cards draw ~123 W while decoding.
 Decode is limited by memory bandwidth, not compute, so a higher power limit
