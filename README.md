@@ -726,39 +726,74 @@ both its RAM tier and its disk tier. A control run without the connector was cor
 I suspect it does not handle NVFP4 KV on a hybrid model, but I did not isolate the cause
 and did not report it upstream. Native offload does not have this problem.
 
-**3. The DSpark draft head — TRIED 2026-09-23, does not load on vLLM 0.30.0.**
+**3. The DSpark draft head. TRIED 2026-09-23 and 2026-10-18: it loads on the 0.32.0
+nightly, and it loses to MTP k=4.**
 The checkpoint here is pinned to the last release that includes the MTP head;
 upstream moved to DSpark, published as a separate 1.4 GB drafter repo
 (`Qwen3.8-27B-DSpark-NVFP4`) alongside a checkpoint whose `lm_head` is NVFP4 and
-whose MTP head is gone.
+whose MTP head is gone. DSpark drafts a block **in parallel** (vLLM sets
+`parallel_drafting = True`), so it should not pay MTP's flat ~2.37 ms per draft
+position. The config is `{"method": "dspark", "model": "/drafter",
+"num_speculative_tokens": 7}`, 7 because the drafter's `block_size` is 7 and k
+must divide by it.
 
-Everything looked promising from the outside: vLLM 0.30.0 ships
-`qwen3_dspark.py`, resolves the architecture (`Resolved architecture:
-Qwen3DSparkModel`), accepts `{"method": "dspark", "model": "/drafter",
-"num_speculative_tokens": 7}` — 7 because the drafter's `block_size` is 7 and k
-must divide by it — and DSpark drafts a block **in parallel** (vLLM sets
-`parallel_drafting = True`), so it would not pay MTP's flat ~2.37 ms per draft
-position. The drafter ships no `lm_head` or `embed_tokens`, sharing the
-target's.
+*It did not load on vLLM 0.30.0.* Weight loading died on both workers with
+`RuntimeError: The size of tensor a (128) must match the size of tensor b (256)`,
+a packing mismatch (NVFP4 stores two values per byte). I first blamed the target's
+shared NVFP4 `lm_head` and concluded it needed the SGLang build. **That diagnosis
+was wrong.** On the 0.32.0 nightly the real cause turned up: the drafter's
+`config.json` lists `markov_head*` and `confidence_head*` under
+`quantization_config.ignore`, but vLLM names the layer `model.markov_head.markov_w2`
+and the exclusion match is anchored, so the BF16 head was built as packed NVFP4.
+Changing the two patterns to `*markov_head*` and `*confidence_head*` in the drafter's
+`config.json` (not `hf_quant_config.json`, which vLLM ignores) makes it load.
 
-It dies in weight loading, on both workers:
+*It loses to MTP.* Same harness (`ab-k-test.py`, three repeats per prompt, greedy,
+one prompt set), tok/s with mean acceptance length in brackets. Both ran with KV
+offload on. The DSpark config also set `"draft_sample_method": "probabilistic"`,
+which the MTP config does not have:
 
-    File "vllm/model_executor/models/qwen3_dflash.py", line 693, in load_weights
-    File "vllm/model_executor/layers/vocab_parallel_embedding.py", line 507
-    RuntimeError: The size of tensor a (128) must match the size of tensor b (256)
-                  at non-singleton dimension 1
+| | prose | code | structured | thinking |
+|---|---:|---:|---:|---:|
+| MTP k=4 (this config) | **64.3** (2.48) | **105.3** (4.09) | 112.8 (4.46) | **79.1** (3.05) |
+| DSpark k=7 | 48.5 (1.88) | 98.8 (3.87) | **113.7** (4.56) | 73.8 (2.86) |
+| DSpark k=4 | 50.5 (1.85) | 86.1 (3.18) | 101.6 (3.82) | 72.7 (2.68) |
 
-That is an NVFP4 packing mismatch — two values per byte, so a 256-wide row
-arrives as 128 bytes — on a vocabulary-sized tensor, i.e. the shared NVFP4
-`lm_head`. Not fixable with flags. **The drafter's model card says it requires
-the Qwen3.8 SGLang build, and that is correct**; read the card before planning
-around it (this was learned the expensive way). Note also that
-`restart: unless-stopped` will cycle the container on this failure.
+Absolute numbers are lower than in the decode tables above because this is a
+different, shorter prompt set; read the rows against each other.
 
-Expected trade if it ever does load on vLLM: the weights are 17.91 GB + 1.4 GB
-= 19.31 GB against 18.8 GB here, ~0.5 GB more, which works out at a pool near
-263K — 262,144 would still fit, with the headroom cut from 16,783 to a few
-thousand.
+**How DSpark hurt.** Decode speed is steps/s × accepted tokens per step, and
+DSpark only lost on the second term:
+
+| Compared with MTP k=4 (DSpark k=7) | Steps/s | Acceptance length | tok/s |
+|---|---:|---:|---:|
+| Prose | 25.5 vs 25.7 | 1.88 vs 2.48 (−24 %) | **−25 %** |
+| Code | | 3.87 vs 4.09 (−5 %) | −6 % |
+| Structured | | 4.56 vs 4.46 (+2 %) | +1 % (a tie) |
+| Thinking | | 2.86 vs 3.05 (−6 %) | −7 % |
+
+Steps/s is the mean over all prompts (drafts ÷ wall time), so it is one figure
+for the whole run, not per category.
+
+- **The step rate was not the problem.** A DSpark step costs about the same as an
+  MTP step, so the parallel draft saved nothing visible. Its cost sits in the
+  step rather than in each draft position, which is why k=7 beats k=4 for DSpark
+  (the opposite of MTP, where each extra position costs 2.37 ms).
+- **The draft head was worse at guessing, hardest on prose.** It lands 1.88
+  tokens per step against MTP's 2.48, and the whole prose loss is that gap. Code
+  and thinking give back 5-7 %. Only structured output, which is predictable
+  enough for any drafter, comes out level.
+- **It also costs VRAM.** The weights on each GPU took **9.62 GiB** with DSpark
+  (target without the MTP head plus the 1.4 GB drafter) against **9.03 GiB** with
+  the MTP head: 0.59 GiB less room per card, from the startup logs. The DSpark run
+  used `--kv-cache-memory 3600000000` and `--max-model-len 200000` and got a pool
+  of **219,047 tokens** (1.10× at 200K), against 450,942 tokens at 262,144 for MTP
+  at `4900000000`. Those two settings are not the same, so this does not prove DSpark
+  cannot reach 262K with a larger `--kv-cache-memory`; I did not try it. What it does
+  show is that the drafter's weights come out of the KV budget, on cards where
+  that budget is already tight.
+- **Net:** DSpark is worse on three of four workloads and ties the fourth, so MTP
+  k=4 stays. The one angle not tested is purely structured, tool-call traffic.
 
 ## vLLM recipe (Docker Compose)
 
