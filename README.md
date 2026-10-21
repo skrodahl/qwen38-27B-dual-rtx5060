@@ -10,47 +10,24 @@
 
 ## Highlights
 
-- **Hardware:** two RTX 5060 Ti 16 GB, tensor parallel. Midrange consumer cards, no 5090.
-- **Model:** Qwen 3.8 27B, NVFP4 weights, NVFP4 KV cache, MTP speculative decoding (k=4).
-- **Speed:** decode up to **125 tok/s** on structured output (JSON, code, tool calls),
-  **78 tok/s** on prose, against 42 tok/s with MTP off. Measured with fp8 KV;
-  NVFP4 KV runs within about 5 %. About 4 % lower with the 2500 MHz clock cap
-  the rig now uses (see [Power](#power)).
-- **Context:** the full **262K** window, with a KV cache of about **475K tokens**
-  (1.81× the window), so nearly two full-context sessions fit at once.
-  (About 451K with KV offload switched on.)
-- **Checked, not assumed:** a 250K needle test, a bf16 / FP8 / NVFP4
-  [KV quality comparison](kv-quality-test.md) (NVFP4 costs roughly 0.2-0.5 %
-  perplexity), and a full MTP sweep from k=0 to 7.
-- **Optional:** KV offload to host RAM, so a session pushed out of the GPU
-  comes back in seconds instead of being prefilled again. A commented-out block in the recipe.
-- **Stock and reproducible:** the official vLLM 0.32.0 Docker image and one
-  Compose file. No patches.
+- **Setup:** two RTX 5060 Ti 16 GB (tensor parallel), Qwen 3.8 27B with NVFP4
+  weights and NVFP4 KV cache, MTP k=4, stock vLLM 0.32.0 in Docker. The full
+  recipe is at the bottom.
+- **Speed:** up to **125 tok/s** on structured output (JSON, code, tool calls),
+  **78 tok/s** on prose, against 42 tok/s with MTP off.
+- **Context:** the full **262K** window, with a **~475K-token** KV cache
+  (about 451K with offload on).
+- **Quality:** NVFP4 KV costs roughly 0.2-0.5 % perplexity and FP8 is
+  indistinguishable from bf16 ([KV quality test](kv-quality-test.md)). The 250K
+  needle test passes.
+- **The tuning that matters:** `max-num-batched-tokens 4096`, FlashInfer
+  autotune off, MTP k=4.
 
-**Who it's for:** anyone who wants long-context agentic or coding work on
-mid-range consumer GPUs and is comfortable with Docker and vLLM. It is tuned for
-**one user, or a few streams** (`max-num-seqs 2`); more concurrent streams make
-the per-stream rate collapse on these cards, so it is not a many-user server.
-
-- **What:** Qwen 3.8 27B (NVFP4 weights, NVFP4 KV cache) on 2 × RTX 5060 Ti,
-  tensor parallel, with MTP speculative decoding, on a headless Ubuntu 26.04
-  box.
-- **How:** the official vLLM 0.32.0 Docker image and one Compose file. The full
-  recipe is at the bottom. The tuning that matters is `max-num-batched-tokens
-  4096`, FlashInfer autotune off, and MTP k=4.
-- **Why:** to show that full-context agentic work doesn't need a 5090. It's
-  verified with a 250K needle test, measured against a no-MTP baseline, and
-  comes with the gotchas that cost context or crash the server.
-- **NVFP4 vs FP8 KV, in short:** NVFP4 KV (in vLLM 0.32.0, 2026-10-18) gives a
-  **+70 % KV pool** (474,032 vs 278,927 tokens) for about **−5 % steps/s**, and
-  costs roughly **0.2-0.5 % perplexity** against bf16, with FP8 indistinguishable
-  from bf16: see the [KV-cache quality test](kv-quality-test.md). It also makes
-  **KV offload to host RAM** worth having; the recipe has a commented-out block.
-- **Which numbers are which:** the decode, depth and k-sweep tables below were
-  measured with **FP8 KV on vLLM 0.30.0**, the baseline. The NVFP4 and offload
-  results, and the quality test, were measured on the **pre-release nightly**
-  (v0.32.0rc1.dev100), same code as the tagged 0.32.0 for this feature. See
-  [What would make this faster](#what-would-make-this-faster).
+**About the numbers.** Speeds are with fp8 KV on vLLM 0.30.0; NVFP4 KV runs
+within about 5 % of that, and the 2500 MHz clock cap (see [Power](#power)) costs
+roughly 4 % more. The NVFP4, offload and quality results were measured on the
+pre-release 0.32.0 nightly (same code for this feature), not the tagged image.
+Details in [What would make this faster](#what-would-make-this-faster).
 
 ## Contents
 
