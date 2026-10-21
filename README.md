@@ -1,8 +1,13 @@
 # Qwen 3.8 27B NVFP4 with NVFP4 KV cache on vLLM 0.32.0
 
-**A 27B model with its full 262K context on two midrange 16 GB cards: stock
-vLLM, no patches, 78 tok/s on prose and 125 tok/s on structured output
-(measured with fp8 KV; NVFP4 KV runs within about 5 % of that).**
+* **Qwen 3.8 27B on two RTX 5060 Ti 16GB**
+* **Up to 125 tok/s decode speed**
+* **~475,000 tokens of KV cache** (full 262K context, twice over)
+* **KV offloading: evicted sessions resume in seconds, not minutes**
+* **Stock vLLM, one Compose file, no patches**
+
+**For you if** you want long-context agentic or coding work on midrange consumer GPUs.
+**Not for you if** you need to serve many users at once: it's tuned for one user or a few streams.
 
 ## Highlights
 
